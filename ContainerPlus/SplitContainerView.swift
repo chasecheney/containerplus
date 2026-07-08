@@ -5,9 +5,13 @@ import AppKit
 
 /// A horizontal, side-by-side split of two panes with a draggable divider.
 ///
-/// The divider snaps to 25%, 50% and 75% of the total width when dragged
-/// within a small threshold of those positions. (25% and 50% are the required
-/// snap points; 75% is the mirror of 25% so the right pane snaps too.)
+/// Resizing is **deferred**: while dragging, only a lightweight guide line
+/// moves (smoothly, at any pixel), and the heavy panes/web views are resized
+/// exactly once, on release. This avoids the ghosting/jitter that comes from
+/// live-resizing a WKWebView every frame.
+///
+/// The guide snaps to 25%, 50% and 75% of the total width when dragged within a
+/// small threshold of those positions.
 struct SplitContainerView<Left: View, Right: View>: View {
     private let left: Left
     private let right: Right
@@ -17,9 +21,10 @@ struct SplitContainerView<Left: View, Right: View>: View {
         self.right = right()
     }
 
-    /// Fraction of the total width given to the left pane.
+    /// Committed fraction of the total width given to the left pane.
     @State private var fraction: CGFloat = 0.5
-    /// Fraction captured at the moment a drag begins.
+    /// Live fraction of the guide while dragging (nil when not dragging).
+    @State private var dragFraction: CGFloat?
     @State private var dragStartFraction: CGFloat?
     @State private var isHoveringDivider = false
 
@@ -32,24 +37,42 @@ struct SplitContainerView<Left: View, Right: View>: View {
     var body: some View {
         GeometryReader { geo in
             let total = max(geo.size.width, 1)
-            // Snap to whole points so the web views never render at sub-pixel
-            // widths (which looks blurry / jittery while dragging).
-            let leftWidth = max(0, (fraction * total - dividerWidth / 2).rounded())
+            let leftWidth = max(0, fraction * total - dividerWidth / 2)
 
-            HStack(spacing: 0) {
-                left
-                    .frame(width: leftWidth)
-                    .clipped()
+            ZStack(alignment: .leading) {
+                HStack(spacing: 0) {
+                    left
+                        .frame(width: leftWidth)
+                        .clipped()
 
-                divider(total: total)
+                    divider(total: total)
 
-                right
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .clipped()
+                    right
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .clipped()
+                }
+
+                // Smooth, cheap drag guide — no pane resizing until release.
+                if let dragFraction {
+                    guideLine
+                        .position(x: dragFraction * total, y: geo.size.height / 2)
+                        .frame(height: geo.size.height)
+                        .allowsHitTesting(false)
+                }
             }
-            // The divider drag drives layout directly; never implicitly animate
-            // the width changes.
-            .animation(nil, value: leftWidth)
+        }
+    }
+
+    private var guideLine: some View {
+        ZStack {
+            Rectangle()
+                .fill(Color.accentColor)
+                .frame(width: 2)
+            VStack(spacing: 3) {
+                ForEach(0..<3, id: \.self) { _ in
+                    Circle().fill(Color.accentColor).frame(width: 4, height: 4)
+                }
+            }
         }
     }
 
@@ -60,10 +83,9 @@ struct SplitContainerView<Left: View, Right: View>: View {
                 .frame(width: 1)
 
             Rectangle()
-                .fill(isHoveringDivider ? Color.accentColor.opacity(0.25) : Color.clear)
+                .fill(isHoveringDivider || dragFraction != nil ? Color.accentColor.opacity(0.25) : Color.clear)
                 .frame(width: dividerWidth)
 
-            // Grip dots for affordance.
             VStack(spacing: 3) {
                 ForEach(0..<3, id: \.self) { _ in
                     Circle()
@@ -71,6 +93,7 @@ struct SplitContainerView<Left: View, Right: View>: View {
                         .frame(width: 3, height: 3)
                 }
             }
+            .opacity(dragFraction == nil ? 1 : 0)
         }
         .frame(width: dividerWidth)
         .frame(maxHeight: .infinity)
@@ -86,10 +109,11 @@ struct SplitContainerView<Left: View, Right: View>: View {
                 .onChanged { value in
                     let start = dragStartFraction ?? fraction
                     if dragStartFraction == nil { dragStartFraction = fraction }
-                    let raw = start + value.translation.width / total
-                    fraction = snapped(clamp(raw))
+                    dragFraction = snapped(clamp(start + value.translation.width / total))
                 }
                 .onEnded { _ in
+                    if let dragFraction { fraction = dragFraction }
+                    dragFraction = nil
                     dragStartFraction = nil
                 }
         )
