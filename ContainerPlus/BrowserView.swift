@@ -144,6 +144,43 @@ private struct TabChip: View {
 
 // MARK: - Navigation toolbar
 
+/// Back / forward / reload. Observes the *selected tab* so button state updates
+/// as the page navigates (the toolbar only observes the view model, which
+/// doesn't publish per-tab navigation changes).
+private struct NavControls: View {
+    @ObservedObject var model: BrowserViewModel
+
+    var body: some View {
+        if let tab = model.selectedTab {
+            NavControlsInner(tab: tab)
+        } else {
+            Group {
+                Image(systemName: "chevron.left")
+                Image(systemName: "chevron.right")
+                Image(systemName: "arrow.clockwise")
+            }
+            .foregroundStyle(.tertiary)
+        }
+    }
+}
+
+private struct NavControlsInner: View {
+    @ObservedObject var tab: BrowserTab
+
+    var body: some View {
+        Button { tab.goBack() } label: { Image(systemName: "chevron.left") }
+            .disabled(!tab.canGoBack)
+            .help("Back")
+        Button { tab.goForward() } label: { Image(systemName: "chevron.right") }
+            .disabled(!tab.canGoForward)
+            .help("Forward")
+        Button { tab.reloadOrStop() } label: {
+            Image(systemName: tab.isLoading ? "xmark" : "arrow.clockwise")
+        }
+        .help(tab.isLoading ? "Stop" : "Reload")
+    }
+}
+
 private struct NavigationToolbar: View {
     @ObservedObject var model: BrowserViewModel
     var requestFileImport: () -> Void
@@ -154,16 +191,7 @@ private struct NavigationToolbar: View {
     var body: some View {
         HStack(spacing: 8) {
             Group {
-                Button { model.selectedTab?.goBack() } label: { Image(systemName: "chevron.left") }
-                    .disabled(!(model.selectedTab?.canGoBack ?? false))
-                    .help("Back")
-                Button { model.selectedTab?.goForward() } label: { Image(systemName: "chevron.right") }
-                    .disabled(!(model.selectedTab?.canGoForward ?? false))
-                    .help("Forward")
-                Button { model.selectedTab?.reloadOrStop() } label: {
-                    Image(systemName: (model.selectedTab?.isLoading ?? false) ? "xmark" : "arrow.clockwise")
-                }
-                .help("Reload")
+                NavControls(model: model)
                 Button { model.goHome() } label: { Image(systemName: "house") }
                     .help("Home")
             }
