@@ -979,16 +979,19 @@ private struct LibraryPickerView: View {
                         }
                     }
                     .buttonStyle(.plain)
+                }
 
-                    if showAll {
-                        ForEach(model.servers) { server in
+                // One Section per server so SwiftUI keeps each server's rows
+                // distinctly identified (otherwise async loads get mismatched).
+                if showAll {
+                    ForEach(model.servers) { server in
+                        Section {
                             let libs = model.serverLibraries[server.clientIdentifier] ?? []
-                            HStack(spacing: 6) {
-                                Image(systemName: "server.rack").foregroundStyle(.secondary)
-                                Text(server.name).font(.subheadline).bold()
-                            }
                             if libs.isEmpty {
-                                HStack(spacing: 6) { ProgressView().controlSize(.small); Text("Loading…").foregroundStyle(.secondary) }
+                                HStack(spacing: 6) {
+                                    ProgressView().controlSize(.small)
+                                    Text("Loading…").foregroundStyle(.secondary)
+                                }
                             } else {
                                 ForEach(libs) { section in
                                     let ref = model.makeRef(server: server, section: section)
@@ -997,6 +1000,8 @@ private struct LibraryPickerView: View {
                                                onToggleFavorite: { prefs.toggleFavorite(ref) })
                                 }
                             }
+                        } header: {
+                            Label(server.name, systemImage: "server.rack")
                         }
                     }
                 }
