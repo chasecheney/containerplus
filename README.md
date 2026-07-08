@@ -4,10 +4,10 @@ A **multiplatform** app (macOS + iPadOS) that shows two **containers** side by
 side. The divider between them is draggable and **snaps at 25%, 50% and 75%**
 of the width.
 
-Panes have no visible chrome — the container fills the whole pane. To switch a
-pane's container, **right-click (macOS)** or **long-press (iPadOS)** anywhere in
-it (this works even over web content) and pick from the menu. Three containers
-are built in:
+The container fills the whole pane. A small **floating menu button** in the
+bottom-trailing corner switches the container (and offers "Refresh to Plex
+Home" when Plex Web is showing). It's a real control layered above the content,
+so it works reliably even over web views. Three containers are built in:
 
 ## Plex Web
 A locked web view for [app.plex.tv](https://app.plex.tv). There is no address

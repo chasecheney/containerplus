@@ -102,11 +102,12 @@ final class PlexPlayerViewModel: ObservableObject {
     }
 
     private func pollForToken(pinID: Int) async throws {
-        // Poll up to ~3 minutes.
-        for _ in 0..<90 {
+        // Poll up to ~5 minutes. Transient network errors are ignored so a
+        // single hiccup doesn't abort the whole sign-in.
+        for _ in 0..<150 {
             try Task.checkCancellation()
             try await Task.sleep(nanoseconds: 2_000_000_000)
-            let pin = try await api.checkPin(id: pinID)
+            guard let pin = try? await api.checkPin(id: pinID) else { continue }
             if let token = pin.authToken, !token.isEmpty {
                 authToken = token
                 await connect()
@@ -313,12 +314,13 @@ private struct LinkingView: View {
         VStack(spacing: 16) {
             ProgressView()
             Text("Waiting for Plex sign-in…").font(.headline)
-            Text("A browser window opened to link this app. If it didn't, tap below and enter this code at plex.tv/link:")
+            Text("A browser window opened to link this app. If it didn't, go to plex.tv/link and enter this code:")
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 340)
-            Text(code)
-                .font(.system(.title, design: .monospaced)).bold()
+            Text(code.uppercased())
+                .font(.system(.largeTitle, design: .monospaced)).bold()
+                .tracking(4)
                 .textSelection(.enabled)
             HStack {
                 Button("Reopen link page") { model.reopenLinkPage() }

@@ -79,10 +79,13 @@ final class PlexAPI {
 
     // MARK: Authentication (PIN linking)
 
+    /// Requests a short (4-character) PIN. We deliberately avoid `strong=true`:
+    /// strong PINs are long and only work through the deep-link auth URL, not
+    /// manual entry at plex.tv/link.
     func createPin() async throws -> PlexPin {
         let url = URL(string: "https://plex.tv/api/v2/pins")!
         let data = try await request(url, method: "POST", token: nil,
-                                     body: "strong=true".data(using: .utf8),
+                                     body: "strong=false".data(using: .utf8),
                                      contentType: "application/x-www-form-urlencoded")
         return try JSONDecoder().decode(PlexPin.self, from: data)
     }

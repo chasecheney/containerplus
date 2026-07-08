@@ -16,35 +16,23 @@ struct ContentView: View {
     }
 }
 
-/// Chrome around a pane. The container content fills the whole pane; there is
-/// no visible picker. To switch containers, **right-click (macOS)** or
-/// **long-press (iPadOS)** anywhere in the pane — including over web content —
-/// and choose from the menu.
+/// Chrome around a pane. The container content fills the whole pane. A small
+/// floating menu button in the bottom-trailing corner switches the container.
+/// It's a real control layered above the content, so it works reliably even
+/// over a `WKWebView` (unlike a gesture, which the web view would swallow).
 struct ContainerHostView: View {
     @ObservedObject var pane: PaneModel
-    @State private var showMenu = false
 
     var body: some View {
-        ZStack {
+        ZStack(alignment: .bottomTrailing) {
             content
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-            // Click-through recognizer; fires the menu even over a WKWebView.
-            SecondaryActivationView { showMenu = true }
-                .allowsHitTesting(false)
+            FloatingContainerMenu(pane: pane)
+                .padding(12)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .clipped()
-        .confirmationDialog("Choose container", isPresented: $showMenu, titleVisibility: .visible) {
-            ForEach(ContainerType.allCases) { type in
-                Button {
-                    pane.selection = type
-                } label: {
-                    Text(pane.selection == type ? "\(type.rawValue) ✓" : type.rawValue)
-                }
-            }
-            Button("Cancel", role: .cancel) {}
-        }
     }
 
     @ViewBuilder
@@ -57,5 +45,47 @@ struct ContainerHostView: View {
         case .plexPlayer:
             PlexPlayerContainerView(model: pane.plexPlayer)
         }
+    }
+}
+
+/// Small always-available button that opens a menu to pick the container
+/// (and container-specific actions, e.g. Plex "go home").
+private struct FloatingContainerMenu: View {
+    @ObservedObject var pane: PaneModel
+    @State private var hovering = false
+
+    var body: some View {
+        Menu {
+            Picker("Container", selection: $pane.selection) {
+                ForEach(ContainerType.allCases) { type in
+                    Label(type.rawValue, systemImage: type.symbolName).tag(type)
+                }
+            }
+            .pickerStyle(.inline)
+
+            if pane.selection == .plexWeb {
+                Divider()
+                Button {
+                    pane.plex.goHome()
+                } label: {
+                    Label("Refresh to Plex Home", systemImage: "house")
+                }
+            }
+        } label: {
+            Image(systemName: pane.selection.symbolName)
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(.primary)
+                .frame(width: 34, height: 34)
+                .background(.thinMaterial, in: Circle())
+                .overlay(Circle().strokeBorder(Palette.separator, lineWidth: 0.5))
+                .shadow(color: .black.opacity(0.2), radius: 3, y: 1)
+        }
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .opacity(hovering ? 1.0 : 0.7)
+        .help("Switch container")
+        #if os(macOS)
+        .onHover { hovering = $0 }
+        #endif
     }
 }

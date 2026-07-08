@@ -87,17 +87,7 @@ struct PlexContainerView: View {
                         .frame(maxWidth: .infinity)
                 }
             }
-            // Long-press anywhere in the Plex view refreshes to the home page.
-            .simultaneousGesture(
-                LongPressGesture(minimumDuration: 0.6)
-                    .onEnded { _ in model.goHome() }
-            )
-            .contextMenu {
-                Button {
-                    model.goHome()
-                } label: {
-                    Label("Refresh to Plex Home", systemImage: "house")
-                }
-            }
+        // "Refresh to Plex Home" now lives in the pane's floating menu,
+        // so it no longer competes with the web view's own gestures.
     }
 }
