@@ -70,6 +70,9 @@ final class PlexPlayerViewModel: ObservableObject {
     @Published var isPlayerMinimized = false
     @Published private(set) var isPlaying = false
     @Published private(set) var quality: PlexQuality = .original
+    /// App-level playback volume (0…1), independent of the device volume.
+    @Published private(set) var volume: Double = 1.0
+    @Published private(set) var isMuted = false
 
     // Sheets
     @Published var showLibraryPicker = false
@@ -409,6 +412,8 @@ final class PlexPlayerViewModel: ObservableObject {
         } else if let offsetMs = item.viewOffset, offsetMs > 0 {
             player.seek(to: CMTime(seconds: Double(offsetMs) / 1000.0, preferredTimescale: 600))
         }
+        player.volume = Float(volume)
+        player.isMuted = isMuted
         nowPlayingItem = item
         nowPlayingTitle = item.type == "episode"
             ? [item.grandparentTitle, item.title].compactMap { $0 }.joined(separator: " — ")
@@ -442,6 +447,21 @@ final class PlexPlayerViewModel: ObservableObject {
     func togglePlayPause() {
         guard let player else { return }
         if player.timeControlStatus == .playing { player.pause() } else { player.play() }
+    }
+
+    /// In-app volume, independent of the device's hardware volume.
+    func setVolume(_ newValue: Double) {
+        volume = max(0, min(1, newValue))
+        player?.volume = Float(volume)
+        if volume > 0 && isMuted {
+            isMuted = false
+            player?.isMuted = false
+        }
+    }
+
+    func toggleMute() {
+        isMuted.toggle()
+        player?.isMuted = isMuted
     }
 
     func minimizePlayer() { withAnimation(.easeInOut(duration: 0.25)) { isPlayerMinimized = true } }
@@ -1058,6 +1078,11 @@ private struct MiniPlayerBar: View {
                 Text(model.isPlaying ? "Playing" : "Paused").font(.caption2).foregroundStyle(.secondary)
             }
             Spacer()
+            Button { model.toggleMute() } label: {
+                Image(systemName: model.isMuted || model.volume == 0 ? "speaker.slash.fill" : "speaker.wave.2.fill").font(.title3)
+            }
+            .buttonStyle(.borderless)
+            .help(model.isMuted ? "Unmute" : "Mute")
             Button { model.togglePlayPause() } label: {
                 Image(systemName: model.isPlaying ? "pause.fill" : "play.fill").font(.title3)
             }
@@ -1091,6 +1116,17 @@ private struct FullPlayerView: View {
                 .help("Minimize")
             Text(model.nowPlayingTitle ?? "").font(.headline).lineLimit(1)
             Spacer()
+
+            // In-app volume (independent of the device volume) + mute.
+            Button { model.toggleMute() } label: {
+                Image(systemName: model.isMuted || model.volume == 0 ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                    .font(.title3)
+            }
+            .help(model.isMuted ? "Unmute" : "Mute")
+            Slider(value: Binding(get: { model.volume }, set: { model.setVolume($0) }), in: 0...1)
+                .frame(width: 110)
+                .tint(.white)
+
             Button { model.presentInfo() } label: { Image(systemName: "info.circle").font(.title3) }
                 .help("Media info")
             Menu {
