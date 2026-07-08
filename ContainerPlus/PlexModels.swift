@@ -187,6 +187,15 @@ struct PlexPart: Decodable {
     let size: Int?
 }
 
+/// The last server connection that worked, cached so relaunch can reconnect
+/// instantly instead of re-discovering servers and probing every address.
+struct PlexCachedConnection: Codable {
+    let serverID: String
+    let serverName: String
+    let baseURL: String
+    let token: String
+}
+
 /// A stable reference to a library section on a specific server, used for
 /// favorites and cross-server browsing.
 struct PlexLibraryRef: Codable, Identifiable, Hashable {

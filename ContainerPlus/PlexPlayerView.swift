@@ -142,6 +142,7 @@ final class PlexPlayerViewModel: ObservableObject {
     func signOut() {
         pollTask?.cancel()
         authToken = nil
+        KeychainHelper.delete("plex.lastConnection")
         baseURL = nil
         serverToken = nil
         connectionCache = [:]
@@ -179,6 +180,21 @@ final class PlexPlayerViewModel: ObservableObject {
 
     func connect() async {
         guard let token = authToken else { phase = .signedOut; return }
+
+        // Fast path: reuse the last-good connection, validated with a quick
+        // probe, and refresh the server list in the background.
+        if let cached = loadCachedConnection(), let base = URL(string: cached.baseURL) {
+            phase = .loading("Reconnecting to \(cached.serverName)…")
+            if await api.probe(base: base, token: cached.token) {
+                baseURL = base
+                serverToken = cached.token
+                connectionCache[cached.serverID] = (base, cached.token)
+                await loadHome()
+                Task { await refreshServers(preferredID: cached.serverID) }
+                return
+            }
+        }
+
         phase = .loading("Finding your servers…")
         do {
             let all = try await api.resources(token: token).filter { $0.isServer }
@@ -190,6 +206,31 @@ final class PlexPlayerViewModel: ObservableObject {
             await select(server: first)
         } catch {
             phase = .error(classify(error))
+        }
+    }
+
+    /// Refresh the server list without disturbing the active connection.
+    private func refreshServers(preferredID: String?) async {
+        guard let token = authToken,
+              let all = try? await api.resources(token: token).filter({ $0.isServer }) else { return }
+        servers = all
+        if selectedServer == nil, let preferredID {
+            selectedServer = all.first { $0.clientIdentifier == preferredID }
+        }
+    }
+
+    private func loadCachedConnection() -> PlexCachedConnection? {
+        guard let raw = KeychainHelper.get("plex.lastConnection"),
+              let data = raw.data(using: .utf8) else { return nil }
+        return try? JSONDecoder().decode(PlexCachedConnection.self, from: data)
+    }
+
+    private func saveCachedConnection(serverID: String, name: String, base: URL, token: String) {
+        connectionCache[serverID] = (base, token)
+        let cached = PlexCachedConnection(serverID: serverID, serverName: name,
+                                          baseURL: base.absoluteString, token: token)
+        if let data = try? JSONEncoder().encode(cached), let raw = String(data: data, encoding: .utf8) {
+            KeychainHelper.set(raw, for: "plex.lastConnection")
         }
     }
 
@@ -210,6 +251,7 @@ final class PlexPlayerViewModel: ObservableObject {
         }
         baseURL = conn.base
         serverToken = conn.token
+        saveCachedConnection(serverID: server.clientIdentifier, name: server.name, base: conn.base, token: conn.token)
         await loadHome()
     }
 
@@ -261,6 +303,7 @@ final class PlexPlayerViewModel: ObservableObject {
             baseURL = conn.base
             serverToken = conn.token
             selectedServer = servers.first { $0.clientIdentifier == ref.serverID }
+            saveCachedConnection(serverID: ref.serverID, name: ref.serverName, base: conn.base, token: conn.token)
             mode = .library(ref)
             stack = []
             sortField = .name

@@ -107,15 +107,24 @@ final class PlexAPI {
         return try await get(url, token: token)
     }
 
-    /// Try each connection (local first, then remote, then relay) and return
-    /// the first that answers, along with the server's access token.
+    /// Probe every connection concurrently and return the best-ranked one that
+    /// answers (local preferred, then remote, then relay). Probing in parallel
+    /// avoids waiting out a timeout on a dead address before trying the next.
     func reachableBaseURL(for server: PlexResource) async -> (base: URL, token: String)? {
         guard let token = server.accessToken, let connections = server.connections else { return nil }
         let ordered = connections.sorted { rank($0) < rank($1) }
-        for connection in ordered {
-            guard let base = URL(string: connection.uri) else { continue }
-            if await ping(base: base, token: token) { return (base, token) }
+        let best: (rank: Int, base: URL)? = await withTaskGroup(of: (Int, URL)?.self) { group in
+            for (index, connection) in ordered.enumerated() {
+                guard let base = URL(string: connection.uri) else { continue }
+                group.addTask { [self] in await probe(base: base, token: token) ? (index, base) : nil }
+            }
+            var chosen: (Int, URL)?
+            for await result in group {
+                if let result, chosen == nil || result.0 < chosen!.0 { chosen = result }
+            }
+            return chosen
         }
+        if let best { return (best.base, token) }
         return nil
     }
 
@@ -124,10 +133,11 @@ final class PlexAPI {
         return c.local ? 0 : 1
     }
 
-    private func ping(base: URL, token: String) async -> Bool {
+    /// Quick reachability check against a base URL.
+    func probe(base: URL, token: String, timeout: TimeInterval = 4) async -> Bool {
         guard let url = URL(string: base.absoluteString + "/identity") else { return false }
         do {
-            _ = try await request(url, token: token, timeout: 5)
+            _ = try await request(url, token: token, timeout: timeout)
             return true
         } catch {
             return false
