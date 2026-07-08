@@ -8,11 +8,13 @@ struct Bookmark: Identifiable, Hashable, Codable {
     var url: String
 }
 
-/// Owns the set of open tabs and the imported bookmarks for one browser pane.
+/// Owns the set of open tabs for one browser pane. Bookmarks and the home
+/// page live in the shared, persisted `BrowserStore`.
 final class BrowserViewModel: ObservableObject {
     @Published var tabs: [BrowserTab] = []
     @Published var selectedTabID: UUID?
-    @Published var bookmarks: [Bookmark] = []
+
+    let store = BrowserStore.shared
 
     var selectedTab: BrowserTab? {
         tabs.first { $0.id == selectedTabID }
@@ -20,13 +22,18 @@ final class BrowserViewModel: ObservableObject {
 
     // MARK: Tab management
 
+    /// Opens a new tab. When `url` is nil the home page is used.
     @discardableResult
     func newTab(url: URL? = nil, select: Bool = true) -> BrowserTab {
         let tab = BrowserTab(viewModel: self)
         tabs.append(tab)
         if select { selectedTabID = tab.id }
-        if let url { tab.load(url) }
+        tab.load(url ?? store.homePage)
         return tab
+    }
+
+    func goHome() {
+        if let tab = selectedTab { tab.load(store.homePage) } else { newTab() }
     }
 
     /// Adopt a web view created by WebKit for a new window/tab.
@@ -48,14 +55,14 @@ final class BrowserViewModel: ObservableObject {
             let newIndex = min(idx, tabs.count - 1)
             selectedTabID = tabs.indices.contains(newIndex) ? tabs[newIndex].id : nil
         }
-        if tabs.isEmpty { newTab(url: URL(string: "https://www.google.com")!) }
+        if tabs.isEmpty { newTab() }
     }
 
     func close(tabWith webView: WKWebView) {
         if let tab = tabs.first(where: { $0.webView === webView }) { close(tab) }
     }
 
-    // MARK: Bookmarks
+    // MARK: Bookmarks (delegated to the shared store)
 
     func openBookmark(_ bookmark: Bookmark, inNewTab: Bool) {
         let url = BrowserTab.normalizedURL(from: bookmark.url)
@@ -66,17 +73,14 @@ final class BrowserViewModel: ObservableObject {
         }
     }
 
-    func addBookmarks(_ new: [Bookmark]) {
-        // De-dupe on URL.
-        var seen = Set(bookmarks.map { $0.url })
-        for b in new where !seen.contains(b.url) {
-            bookmarks.append(b)
-            seen.insert(b.url)
-        }
+    var isCurrentBookmarked: Bool {
+        guard let tab = selectedTab else { return false }
+        return store.isBookmarked(tab.urlString)
     }
 
-    func bookmarkCurrentTab() {
+    /// Toggle the bookmark for the current page.
+    func toggleBookmarkCurrentTab() {
         guard let tab = selectedTab, !tab.urlString.isEmpty else { return }
-        addBookmarks([Bookmark(title: tab.title, url: tab.urlString)])
+        store.toggleBookmark(title: tab.title, url: tab.urlString)
     }
 }

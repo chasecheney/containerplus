@@ -20,7 +20,14 @@ keychain. **Long-press** anywhere in the Plex view (or right-click →
 A tabbed browser built on `WKWebView`:
 - Tabs with title, loading state and close buttons; **+** opens a new tab.
 - Address bar that navigates URLs or falls back to a Google search.
-- Back / forward / reload / stop.
+- Back / forward / reload / stop / **Home**.
+- **Bookmarks**: the star toggles a bookmark for the current page (filled when
+  bookmarked). The book menu opens recent bookmarks and offers "Manage
+  Bookmarks…" (a searchable editor to open/rename/edit/delete individually) and
+  "Clear All Bookmarks". Bookmarks and the home page are shared across panes and
+  persist across launches.
+- **Home page**: set it from the book menu ("Set current page as Home" or
+  "Change home page…"); new tabs and the Home button open it.
 - **New windows open as new tabs** (`window.open`, `target="_blank"`,
   ⌘-click), and background tabs keep loading.
 - **Bookmark import** from Safari, Chrome, Edge, Brave, or any file. Because
@@ -37,9 +44,19 @@ A **native** Plex client (no web view) built on the Plex API and `AVPlayer`:
   (local → remote → relay) and using the first that responds.
 - **Browse** On Deck, Recently Added, and your libraries, drilling into shows →
   seasons → episodes.
-- **Play** in an `AVPlayer` overlay, resuming from the last watched offset.
-  Direct play is used for AVFoundation-friendly containers (mp4/mov/m4v);
-  everything else falls back to the Plex universal transcoder (HLS).
+- **Library switcher**: a dropdown in the top-left opens a picker with your
+  **favorite libraries** (reorderable, heart to favorite/unfavorite) and a
+  "Browse all servers" section listing every server and its libraries.
+- **Minimizable player**: the collapse (⌄) button shrinks playback into a
+  bottom mini-bar (with play/pause, expand, stop) so you can keep browsing
+  while the video keeps playing; tap the bar to expand again.
+- **Playback quality**: switch between Original and 1080p/720p/480p transcodes
+  (resumes at the current position).
+- **Media info**: the ℹ️ button shows resolution, codecs, bitrate, container,
+  size, and the file's name/path.
+- **Play** in an `AVPlayer`, resuming from the last watched offset. Direct play
+  is used for AVFoundation-friendly containers (mp4/mov/m4v); everything else
+  falls back to the Plex universal transcoder (HLS).
 
 Networking lives in `PlexAPI.swift` / `PlexModels.swift`; UI + state in
 `PlexPlayerView.swift`. On iPad, reaching a server on your LAN triggers the

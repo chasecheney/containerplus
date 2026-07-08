@@ -95,22 +95,10 @@ final class PlexAPI {
         return try await get(url, token: nil)
     }
 
-    /// The page the user visits to authorize this app.
-    func authURL(code: String) -> URL {
-        let forwardURL = "https://app.plex.tv/desktop"
-        var items: [String] = []
-        func add(_ key: String, _ value: String) {
-            let v = value.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? value
-            items.append("\(key)=\(v)")
-        }
-        add("clientID", clientID)
-        add("code", code)
-        add("context[device][product]", product)
-        add("forwardUrl", forwardURL)
-        var comps = URLComponents(string: "https://app.plex.tv/auth")!
-        comps.fragment = "?" + items.joined(separator: "&")
-        return comps.url!
-    }
+    /// The page the user visits to authorize this app by entering the PIN.
+    /// (The `app.plex.tv/auth` deep link now redirects to the Plex web app, so
+    /// we use the plain link page and rely on the 4-character code.)
+    let linkPageURL = URL(string: "https://plex.tv/link")!
 
     // MARK: Server discovery
 
@@ -170,6 +158,11 @@ final class PlexAPI {
         try await metadataList(path: "/library/metadata/\(ratingKey)/children", base: base, token: token)
     }
 
+    /// Full metadata for one item (includes Media/Part technical fields + file path).
+    func metadata(base: URL, token: String, ratingKey: String) async throws -> PlexMetadata? {
+        try await metadataList(path: "/library/metadata/\(ratingKey)", base: base, token: token).first
+    }
+
     private func metadataList(path: String, base: URL, token: String) async throws -> [PlexMetadata] {
         let url = URL(string: base.absoluteString + path)!
         let response: MediaContainerResponse = try await get(url, token: token)
@@ -183,23 +176,26 @@ final class PlexAPI {
         return URL(string: base.absoluteString + path + "?X-Plex-Token=" + token)
     }
 
-    /// A URL AVPlayer can play. Uses direct play for AVFoundation-friendly
-    /// containers, otherwise the Plex universal transcoder (HLS).
-    func playbackURL(base: URL, token: String, item: PlexMetadata) -> URL? {
-        let friendly: Set<String> = ["mp4", "mov", "m4v"]
-        if let partKey = item.partKey,
-           let container = item.partContainer?.lowercased(),
-           friendly.contains(container) {
-            return URL(string: base.absoluteString + partKey + "?X-Plex-Token=" + token)
+    /// A URL AVPlayer can play at the requested quality. `.original` uses
+    /// direct play for AVFoundation-friendly containers, otherwise the Plex
+    /// universal transcoder (HLS). Other qualities force a transcode.
+    func playbackURL(base: URL, token: String, item: PlexMetadata, quality: PlexQuality) -> URL? {
+        if quality == .original {
+            let friendly: Set<String> = ["mp4", "mov", "m4v"]
+            if let partKey = item.partKey,
+               let container = item.partContainer?.lowercased(),
+               friendly.contains(container) {
+                return URL(string: base.absoluteString + partKey + "?X-Plex-Token=" + token)
+            }
         }
-        return transcodeURL(base: base, token: token, item: item)
+        return transcodeURL(base: base, token: token, item: item, quality: quality)
     }
 
-    func transcodeURL(base: URL, token: String, item: PlexMetadata) -> URL? {
+    func transcodeURL(base: URL, token: String, item: PlexMetadata, quality: PlexQuality) -> URL? {
         func enc(_ s: String) -> String {
             s.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? s
         }
-        let params = [
+        var params = [
             "path=" + enc("/library/metadata/\(item.ratingKey)"),
             "mediaIndex=0",
             "partIndex=0",
@@ -209,13 +205,46 @@ final class PlexAPI {
             "directStream=1",
             "subtitles=burn",
             "videoQuality=100",
-            "maxVideoBitrate=20000",
             "X-Plex-Client-Identifier=" + enc(clientID),
             "X-Plex-Product=" + enc(product),
             "X-Plex-Platform=" + enc(platform),
             "X-Plex-Token=" + enc(token),
         ]
+        if let bitrate = quality.maxVideoBitrateKbps {
+            params.append("maxVideoBitrate=\(bitrate)")
+        }
+        if let resolution = quality.videoResolution {
+            params.append("videoResolution=" + resolution)
+        }
         return URL(string: base.absoluteString + "/video/:/transcode/universal/start.m3u8?"
                    + params.joined(separator: "&"))
+    }
+}
+
+/// Selectable playback quality for the Plex player.
+enum PlexQuality: String, CaseIterable, Identifiable {
+    case original = "Original"
+    case p1080 = "1080p (20 Mbps)"
+    case p720 = "720p (4 Mbps)"
+    case p480 = "480p (2 Mbps)"
+
+    var id: String { rawValue }
+
+    var maxVideoBitrateKbps: Int? {
+        switch self {
+        case .original: return nil
+        case .p1080: return 20000
+        case .p720: return 4000
+        case .p480: return 2000
+        }
+    }
+
+    var videoResolution: String? {
+        switch self {
+        case .original: return nil
+        case .p1080: return "1920x1080"
+        case .p720: return "1280x720"
+        case .p480: return "720x480"
+        }
     }
 }

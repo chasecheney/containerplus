@@ -6,13 +6,25 @@ import UniformTypeIdentifiers
 /// bookmarks, and the active web view.
 struct BrowserContainerView: View {
     @ObservedObject var model: BrowserViewModel
+    @ObservedObject private var store = BrowserStore.shared
     @State private var isImportingBookmarks = false
+    @State private var isEditingHome = false
+    @State private var homeDraft = ""
+    @State private var showingBookmarksManager = false
+    @State private var confirmClearAll = false
 
     var body: some View {
         VStack(spacing: 0) {
             TabStrip(model: model)
             Divider()
-            NavigationToolbar(model: model, requestFileImport: { isImportingBookmarks = true })
+            NavigationToolbar(model: model,
+                              requestFileImport: { isImportingBookmarks = true },
+                              requestEditHome: {
+                                  homeDraft = store.homePage.absoluteString
+                                  isEditingHome = true
+                              },
+                              requestManageBookmarks: { showingBookmarksManager = true },
+                              requestClearAllBookmarks: { confirmClearAll = true })
             Divider()
             webArea
         }
@@ -21,8 +33,27 @@ struct BrowserContainerView: View {
                       allowedContentTypes: [.data],
                       allowsMultipleSelection: false) { result in
             if case .success(let urls) = result, let url = urls.first {
-                model.addBookmarks(BookmarkImporter.parse(fileAt: url))
+                store.addBookmarks(BookmarkImporter.parse(fileAt: url))
             }
+        }
+        .alert("Home Page", isPresented: $isEditingHome) {
+            TextField("https://example.com", text: $homeDraft)
+                #if os(iOS)
+                .textInputAutocapitalization(.never)
+                .keyboardType(.URL)
+                #endif
+            Button("Save") { store.setHomePage(homeDraft) }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("New tabs and the Home button open this page.")
+        }
+        .confirmationDialog("Remove all \(store.bookmarks.count) bookmarks? This can't be undone.",
+                            isPresented: $confirmClearAll, titleVisibility: .visible) {
+            Button("Clear All Bookmarks", role: .destructive) { store.clearBookmarks() }
+            Button("Cancel", role: .cancel) {}
+        }
+        .sheet(isPresented: $showingBookmarksManager) {
+            BookmarksManagerView(model: model)
         }
     }
 
@@ -116,6 +147,9 @@ private struct TabChip: View {
 private struct NavigationToolbar: View {
     @ObservedObject var model: BrowserViewModel
     var requestFileImport: () -> Void
+    var requestEditHome: () -> Void
+    var requestManageBookmarks: () -> Void
+    var requestClearAllBookmarks: () -> Void
 
     var body: some View {
         HStack(spacing: 8) {
@@ -130,20 +164,57 @@ private struct NavigationToolbar: View {
                     Image(systemName: (model.selectedTab?.isLoading ?? false) ? "xmark" : "arrow.clockwise")
                 }
                 .help("Reload")
+                Button { model.goHome() } label: { Image(systemName: "house") }
+                    .help("Home")
             }
             .buttonStyle(.borderless)
 
             AddressField(model: model)
 
-            Button { model.bookmarkCurrentTab() } label: { Image(systemName: "star") }
-                .buttonStyle(.borderless)
-                .help("Bookmark this page")
+            StarButton(model: model)
 
-            BookmarksMenu(model: model, requestFileImport: requestFileImport)
+            BookmarksMenu(model: model,
+                          requestFileImport: requestFileImport,
+                          requestEditHome: requestEditHome,
+                          requestManageBookmarks: requestManageBookmarks,
+                          requestClearAllBookmarks: requestClearAllBookmarks)
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
         .background(.bar)
+    }
+}
+
+/// Star that reflects whether the current page is bookmarked and toggles it.
+private struct StarButton: View {
+    @ObservedObject var model: BrowserViewModel
+
+    var body: some View {
+        // Observing the tab keeps the star in sync as the page navigates;
+        // switching tabs re-renders this because `model` publishes the change.
+        if let tab = model.selectedTab {
+            StarButtonInner(tab: tab)
+        } else {
+            Image(systemName: "star").foregroundStyle(.secondary)
+        }
+    }
+}
+
+private struct StarButtonInner: View {
+    @ObservedObject var tab: BrowserTab
+    @ObservedObject private var store = BrowserStore.shared
+
+    var body: some View {
+        let bookmarked = store.isBookmarked(tab.urlString)
+        Button {
+            store.toggleBookmark(title: tab.title, url: tab.urlString)
+        } label: {
+            Image(systemName: bookmarked ? "star.fill" : "star")
+                .foregroundStyle(bookmarked ? Color.yellow : Color.primary)
+        }
+        .buttonStyle(.borderless)
+        .disabled(tab.urlString.isEmpty)
+        .help(bookmarked ? "Remove bookmark" : "Bookmark this page")
     }
 }
 
@@ -181,24 +252,49 @@ private struct AddressFieldInner: View {
 
 private struct BookmarksMenu: View {
     @ObservedObject var model: BrowserViewModel
+    @ObservedObject private var store = BrowserStore.shared
     var requestFileImport: () -> Void
+    var requestEditHome: () -> Void
+    var requestManageBookmarks: () -> Void
+    var requestClearAllBookmarks: () -> Void
+
+    /// Cap the inline list so a big import doesn't create a giant menu.
+    private let inlineLimit = 12
 
     var body: some View {
         Menu {
+            Section("Home Page") {
+                Button {
+                    if let tab = model.selectedTab, !tab.urlString.isEmpty {
+                        store.setHomePage(tab.urlString)
+                    }
+                } label: {
+                    Label("Set current page as Home", systemImage: "house")
+                }
+                .disabled(model.selectedTab?.urlString.isEmpty ?? true)
+
+                Button {
+                    requestEditHome()
+                } label: {
+                    Label("Change home page…", systemImage: "pencil")
+                }
+            }
+
             Section("Import") {
                 #if os(macOS)
                 ForEach(BookmarkImporter.Source.allCases) { source in
                     Button("Import from \(source.rawValue)") {
-                        model.addBookmarks(BookmarkImporter.promptImport(from: source))
+                        store.addBookmarks(BookmarkImporter.promptImport(from: source))
                     }
                 }
                 #else
                 Button("Import Bookmarks…") { requestFileImport() }
                 #endif
             }
-            if !model.bookmarks.isEmpty {
-                Section("Bookmarks") {
-                    ForEach(model.bookmarks) { bookmark in
+
+            if !store.bookmarks.isEmpty {
+                Section("Bookmarks (\(store.bookmarks.count))") {
+                    ForEach(store.bookmarks.prefix(inlineLimit)) { bookmark in
                         Button {
                             model.openBookmark(bookmark, inNewTab: false)
                         } label: {
@@ -206,11 +302,141 @@ private struct BookmarksMenu: View {
                         }
                     }
                 }
+                Section {
+                    Button {
+                        requestManageBookmarks()
+                    } label: {
+                        Label("Manage Bookmarks…", systemImage: "list.bullet")
+                    }
+                    Button(role: .destructive) {
+                        requestClearAllBookmarks()
+                    } label: {
+                        Label("Clear All Bookmarks", systemImage: "trash")
+                    }
+                }
             }
         } label: {
             Image(systemName: "book")
         }
         .fixedSize()
-        .help("Bookmarks")
+        .help("Bookmarks & Home")
+    }
+}
+
+// MARK: - Bookmarks manager
+
+/// A full editor for the (potentially large) bookmark list: search, open,
+/// rename/edit URL, delete individually, and clear all.
+private struct BookmarksManagerView: View {
+    @ObservedObject var model: BrowserViewModel
+    @ObservedObject private var store = BrowserStore.shared
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var search = ""
+    @State private var editing: Bookmark?
+    @State private var draftTitle = ""
+    @State private var draftURL = ""
+    @State private var confirmClearAll = false
+
+    private var filtered: [Bookmark] {
+        guard !search.isEmpty else { return store.bookmarks }
+        return store.bookmarks.filter {
+            $0.title.localizedCaseInsensitiveContains(search)
+            || $0.url.localizedCaseInsensitiveContains(search)
+        }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("Bookmarks (\(store.bookmarks.count))").font(.headline)
+                Spacer()
+                Button(role: .destructive) { confirmClearAll = true } label: {
+                    Text("Clear All")
+                }
+                .disabled(store.bookmarks.isEmpty)
+                Button("Done") { dismiss() }
+                    .keyboardShortcut(.defaultAction)
+            }
+            .padding()
+
+            Divider()
+
+            TextField("Search bookmarks", text: $search)
+                .textFieldStyle(.roundedBorder)
+                .padding(.horizontal)
+                .padding(.top, 8)
+
+            if filtered.isEmpty {
+                Spacer()
+                Text(store.bookmarks.isEmpty ? "No bookmarks yet." : "No matches.")
+                    .foregroundStyle(.secondary)
+                Spacer()
+            } else {
+                List {
+                    ForEach(filtered) { bookmark in
+                        row(bookmark)
+                    }
+                }
+            }
+        }
+        .frame(minWidth: 460, minHeight: 520)
+        .alert("Edit Bookmark", isPresented: Binding(
+            get: { editing != nil },
+            set: { if !$0 { editing = nil } }
+        )) {
+            TextField("Title", text: $draftTitle)
+            TextField("URL", text: $draftURL)
+                #if os(iOS)
+                .textInputAutocapitalization(.never)
+                .keyboardType(.URL)
+                #endif
+            Button("Save") {
+                if let editing { store.updateBookmark(id: editing.id, title: draftTitle, url: draftURL) }
+            }
+            Button("Cancel", role: .cancel) {}
+        }
+        .confirmationDialog("Remove all \(store.bookmarks.count) bookmarks? This can't be undone.",
+                            isPresented: $confirmClearAll, titleVisibility: .visible) {
+            Button("Clear All Bookmarks", role: .destructive) { store.clearBookmarks() }
+            Button("Cancel", role: .cancel) {}
+        }
+    }
+
+    private func row(_ bookmark: Bookmark) -> some View {
+        HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(bookmark.title.isEmpty ? bookmark.url : bookmark.title)
+                    .lineLimit(1)
+                Text(bookmark.url)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            Spacer()
+            Button {
+                model.openBookmark(bookmark, inNewTab: true)
+                dismiss()
+            } label: { Image(systemName: "arrow.up.forward.square") }
+                .buttonStyle(.borderless)
+                .help("Open in new tab")
+            Button {
+                startEdit(bookmark)
+            } label: { Image(systemName: "pencil") }
+                .buttonStyle(.borderless)
+                .help("Edit")
+            Button(role: .destructive) {
+                store.removeBookmark(bookmark)
+            } label: { Image(systemName: "trash") }
+                .buttonStyle(.borderless)
+                .help("Delete")
+        }
+        .contentShape(Rectangle())
+    }
+
+    private func startEdit(_ bookmark: Bookmark) {
+        draftTitle = bookmark.title
+        draftURL = bookmark.url
+        editing = bookmark
     }
 }

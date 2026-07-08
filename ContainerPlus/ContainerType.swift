@@ -37,7 +37,7 @@ final class PaneModel: ObservableObject, Identifiable {
         self.browser = BrowserViewModel()
         self.plex = PlexViewModel()
         self.plexPlayer = PlexPlayerViewModel()
-        if let homeURL { self.browser.newTab(url: homeURL, select: true) }
-        else { self.browser.newTab(url: URL(string: "https://www.google.com")!, select: true) }
+        // Opens the configured home page (or an explicit override).
+        self.browser.newTab(url: homeURL, select: true)
     }
 }

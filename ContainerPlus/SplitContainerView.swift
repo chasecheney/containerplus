@@ -32,7 +32,9 @@ struct SplitContainerView<Left: View, Right: View>: View {
     var body: some View {
         GeometryReader { geo in
             let total = max(geo.size.width, 1)
-            let leftWidth = max(0, fraction * total - dividerWidth / 2)
+            // Snap to whole points so the web views never render at sub-pixel
+            // widths (which looks blurry / jittery while dragging).
+            let leftWidth = max(0, (fraction * total - dividerWidth / 2).rounded())
 
             HStack(spacing: 0) {
                 left
@@ -45,6 +47,9 @@ struct SplitContainerView<Left: View, Right: View>: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .clipped()
             }
+            // The divider drag drives layout directly; never implicitly animate
+            // the width changes.
+            .animation(nil, value: leftWidth)
         }
     }
 
