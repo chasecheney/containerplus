@@ -40,8 +40,26 @@ struct MediaContainerResponse: Decodable {
 struct MediaContainer: Decodable {
     let directory: [PlexDirectory]?
     let metadata: [PlexMetadata]?
+    let hub: [PlexHub]?
     enum CodingKeys: String, CodingKey {
         case directory = "Directory"
+        case metadata = "Metadata"
+        case hub = "Hub"
+    }
+}
+
+/// A "hub" on the Recommended screen (e.g. "Recently Released", "Because you
+/// watched…"). Returned by `/hubs/sections/{key}`.
+struct PlexHub: Decodable, Identifiable {
+    let hubIdentifier: String?
+    let title: String?
+    let type: String?
+    let metadata: [PlexMetadata]?
+
+    var id: String { hubIdentifier ?? title ?? UUID().uuidString }
+
+    enum CodingKeys: String, CodingKey {
+        case hubIdentifier, title, type
         case metadata = "Metadata"
     }
 }
@@ -79,6 +97,10 @@ struct PlexMetadata: Decodable, Identifiable {
     let index: Int?
     let duration: Int?
     let viewOffset: Int?
+    let leafCount: Int?
+    let childCount: Int?
+    let playlistType: String?
+    let composite: String?
     let media: [PlexMedia]?
 
     var id: String { ratingKey }
@@ -86,6 +108,7 @@ struct PlexMetadata: Decodable, Identifiable {
     enum CodingKeys: String, CodingKey {
         case ratingKey, key, type, title, grandparentTitle, parentTitle
         case summary, thumb, art, year, index, duration, viewOffset
+        case leafCount, childCount, playlistType, composite
         case media = "Media"
     }
 
@@ -114,6 +137,11 @@ struct PlexMetadata: Decodable, Identifiable {
 }
 
 extension PlexMetadata {
+    /// Artwork path to show on a card (playlists use `composite`).
+    var posterPath: String? { thumb ?? composite }
+
+    var isPlaylist: Bool { type == "playlist" }
+
     /// The on-disk filename of the first part, if known.
     var fileName: String? {
         guard let path = media?.first?.parts?.first?.file else { return nil }

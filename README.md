@@ -47,6 +47,12 @@ A **native** Plex client (no web view) built on the Plex API and `AVPlayer`:
 - **Library switcher**: a dropdown in the top-left opens a picker with your
   **favorite libraries** (reorderable, heart to favorite/unfavorite) and a
   "Browse all servers" section listing every server and its libraries.
+- **Library tabs**: each library has **Recommended** (Plex hubs), **Browse**,
+  and **Playlists** (server-side). Browse sorts by Name / Release Date / Date
+  Added, ascending or descending; TV libraries toggle **Shows vs Episodes**;
+  and **Play All / Shuffle All** queues the current list. Large libraries show
+  a distinct "Contacting server…" vs "Downloading library…" state (and won't
+  time out), so a stalled connection is distinguishable from a slow download.
 - **Minimizable player**: the collapse (⌄) button shrinks playback into a
   bottom mini-bar (with play/pause, expand, stop) so you can keep browsing
   while the video keeps playing; tap the bar to expand again.

@@ -14,7 +14,28 @@ final class PlexPlayerViewModel: ObservableObject {
         case error(String)
     }
 
-    /// A level in the browse stack (a library section or a drilled-in show/season).
+    enum BrowseMode: Equatable {
+        case home
+        case library(PlexLibraryRef)
+    }
+
+    enum LibraryTab: String, CaseIterable, Identifiable {
+        case recommended = "Recommended"
+        case browse = "Browse"
+        case playlists = "Playlists"
+        var id: String { rawValue }
+    }
+
+    /// Load state for the (potentially large) Browse list. Distinguishes
+    /// "waiting to connect" from "server is responding, downloading".
+    enum LoadState: Equatable {
+        case idle
+        case connecting
+        case downloading
+        case ready
+        case failed(String)
+    }
+
     struct BrowseLevel: Identifiable {
         let id = UUID()
         let title: String
@@ -27,11 +48,20 @@ final class PlexPlayerViewModel: ObservableObject {
     @Published private(set) var onDeck: [PlexMetadata] = []
     @Published private(set) var recentlyAdded: [PlexMetadata] = []
     @Published private(set) var sections: [PlexDirectory] = []
-    @Published private(set) var stack: [BrowseLevel] = []
-    @Published private(set) var currentLibraryTitle: String = "Home"
-
-    /// Libraries per server for the picker's "All Libraries" view.
     @Published private(set) var serverLibraries: [String: [PlexDirectory]] = [:]
+
+    // Library browsing
+    @Published private(set) var mode: BrowseMode = .home
+    @Published private(set) var stack: [BrowseLevel] = []
+    @Published var libraryTab: LibraryTab = .browse
+    @Published var sortField: PlexSortField = .name
+    @Published var sortAscending = true
+    @Published var tvEpisodes = false
+    @Published private(set) var recommendedHubs: [PlexHub] = []
+    @Published private(set) var browseItems: [PlexMetadata] = []
+    @Published private(set) var playlists: [PlexMetadata] = []
+    @Published private(set) var libraryLoadState: LoadState = .idle
+    @Published private(set) var tabLoading = false
 
     // Player
     @Published var player: AVPlayer?
@@ -52,9 +82,12 @@ final class PlexPlayerViewModel: ObservableObject {
     private var connectionCache: [String: (base: URL, token: String)] = [:]
     private var pollTask: Task<Void, Never>?
     private var statusObservation: NSKeyValueObservation?
+    private var endObserver: NSObjectProtocol?
 
-    /// Non-isolated so a pane (created off the main actor) can construct it;
-    /// all stored properties have default values.
+    // Play queue
+    private var playQueue: [PlexMetadata] = []
+    private var queueIndex = 0
+
     nonisolated init() {}
 
     private var authToken: String? {
@@ -65,16 +98,21 @@ final class PlexPlayerViewModel: ObservableObject {
         }
     }
 
-    // MARK: Lifecycle
+    var currentLibrary: PlexLibraryRef? {
+        if case .library(let ref) = mode { return ref }
+        return nil
+    }
+
+    var isShowLibrary: Bool { currentLibrary?.type == "show" }
+
+    var navTitle: String { currentLibrary?.title ?? "Home" }
+
+    // MARK: Lifecycle / auth
 
     func start() {
         guard case .signedOut = phase else { return }
-        if authToken != nil {
-            Task { await connect() }
-        }
+        if authToken != nil { Task { await connect() } }
     }
-
-    // MARK: Sign in / out
 
     func beginLinking() {
         pollTask?.cancel()
@@ -110,8 +148,12 @@ final class PlexPlayerViewModel: ObservableObject {
         onDeck = []
         recentlyAdded = []
         serverLibraries = [:]
+        mode = .home
         stack = []
-        currentLibraryTitle = "Home"
+        recommendedHubs = []
+        browseItems = []
+        playlists = []
+        libraryLoadState = .idle
         closePlayer()
         phase = .signedOut
     }
@@ -130,7 +172,7 @@ final class PlexPlayerViewModel: ObservableObject {
         phase = .error("Timed out waiting for Plex sign-in.")
     }
 
-    // MARK: Connect + servers
+    // MARK: Servers
 
     func connect() async {
         guard let token = authToken else { phase = .signedOut; return }
@@ -144,7 +186,7 @@ final class PlexPlayerViewModel: ObservableObject {
             }
             await select(server: first)
         } catch {
-            phase = .error(error.localizedDescription)
+            phase = .error(classify(error))
         }
     }
 
@@ -165,15 +207,14 @@ final class PlexPlayerViewModel: ObservableObject {
         }
         baseURL = conn.base
         serverToken = conn.token
-        currentLibraryTitle = "Home"
         await loadHome()
     }
 
     func loadHome() async {
         guard let base = baseURL, let token = serverToken else { return }
         phase = .loading("Loading your library…")
+        mode = .home
         stack = []
-        currentLibraryTitle = "Home"
         async let deck = try? api.onDeck(base: base, token: token)
         async let recent = try? api.recentlyAdded(base: base, token: token)
         async let secs = try? api.sections(base: base, token: token)
@@ -183,7 +224,6 @@ final class PlexPlayerViewModel: ObservableObject {
         phase = .browsing
     }
 
-    /// Load every server's library list for the picker's "All Libraries" view.
     func loadAllServerLibraries() {
         for server in servers where serverLibraries[server.clientIdentifier] == nil {
             Task {
@@ -200,7 +240,7 @@ final class PlexPlayerViewModel: ObservableObject {
                        sectionKey: section.key, title: section.title, type: section.type)
     }
 
-    // MARK: Library / Home selection
+    // MARK: Home / library selection
 
     func selectHome() {
         showLibraryPicker = false
@@ -218,10 +258,17 @@ final class PlexPlayerViewModel: ObservableObject {
             baseURL = conn.base
             serverToken = conn.token
             selectedServer = servers.first { $0.clientIdentifier == ref.serverID }
-            currentLibraryTitle = ref.title
-            let items = (try? await api.sectionItems(base: conn.base, token: conn.token, sectionKey: ref.sectionKey)) ?? []
-            stack = [BrowseLevel(title: ref.title, items: items)]
+            mode = .library(ref)
+            stack = []
+            sortField = .name
+            sortAscending = true
+            tvEpisodes = false
+            recommendedHubs = []
+            browseItems = []
+            playlists = []
+            libraryTab = .recommended
             phase = .browsing
+            loadLibraryTab()
         }
     }
 
@@ -230,10 +277,75 @@ final class PlexPlayerViewModel: ObservableObject {
         select(library: makeRef(server: server, section: section))
     }
 
-    // MARK: Browsing / drill-down
+    // MARK: Library tabs
+
+    func setLibraryTab(_ tab: LibraryTab) {
+        libraryTab = tab
+        loadLibraryTab()
+    }
+
+    func loadLibraryTab() {
+        switch libraryTab {
+        case .recommended: loadRecommended()
+        case .browse: loadBrowse()
+        case .playlists: loadPlaylists()
+        }
+    }
+
+    func loadRecommended() {
+        guard let ref = currentLibrary, let base = baseURL, let token = serverToken else { return }
+        tabLoading = true
+        recommendedHubs = []
+        Task {
+            let hubs = (try? await api.hubs(base: base, token: token, sectionKey: ref.sectionKey)) ?? []
+            recommendedHubs = hubs.filter { ($0.metadata?.isEmpty == false) }
+            tabLoading = false
+        }
+    }
+
+    func loadPlaylists() {
+        guard let base = baseURL, let token = serverToken else { return }
+        tabLoading = true
+        Task {
+            playlists = (try? await api.playlists(base: base, token: token)) ?? []
+            tabLoading = false
+        }
+    }
+
+    func loadBrowse() {
+        guard let ref = currentLibrary, let base = baseURL, let token = serverToken else { return }
+        let type: Int? = ref.type == "show" ? (tvEpisodes ? 4 : 2) : nil
+        let sort = sortField.key + (sortAscending ? ":asc" : ":desc")
+        libraryLoadState = .connecting
+        browseItems = []
+        Task {
+            do {
+                let items = try await api.sectionItems(
+                    base: base, token: token, sectionKey: ref.sectionKey,
+                    type: type, sort: sort,
+                    onResponse: { [weak self] in
+                        Task { @MainActor in
+                            if self?.libraryLoadState == .connecting { self?.libraryLoadState = .downloading }
+                        }
+                    }
+                )
+                browseItems = items
+                libraryLoadState = .ready
+            } catch {
+                libraryLoadState = .failed(classify(error))
+            }
+        }
+    }
+
+    func setSortField(_ field: PlexSortField) { sortField = field; loadBrowse() }
+    func setSortAscending(_ ascending: Bool) { sortAscending = ascending; loadBrowse() }
+    func setTVEpisodes(_ episodes: Bool) { tvEpisodes = episodes; loadBrowse() }
+
+    // MARK: Drill-down
 
     func open(item: PlexMetadata) {
-        if item.isPlayable { play(item: item); return }
+        if item.isPlaylist { openPlaylist(item); return }
+        if item.isPlayable { playSingle(item); return }
         guard let base = baseURL, let token = serverToken else { return }
         Task {
             if let children = try? await api.children(base: base, token: token, ratingKey: item.ratingKey) {
@@ -242,9 +354,17 @@ final class PlexPlayerViewModel: ObservableObject {
         }
     }
 
-    /// Back within the current library; from the library root, returns Home.
+    func openPlaylist(_ item: PlexMetadata) {
+        guard let base = baseURL, let token = serverToken else { return }
+        Task {
+            if let items = try? await api.playlistItems(base: base, token: token, ratingKey: item.ratingKey) {
+                stack.append(BrowseLevel(title: item.title, items: items))
+            }
+        }
+    }
+
     func back() {
-        if stack.count > 1 { stack.removeLast() } else { selectHome() }
+        if !stack.isEmpty { stack.removeLast() } else { selectHome() }
     }
 
     // MARK: Images
@@ -256,7 +376,31 @@ final class PlexPlayerViewModel: ObservableObject {
 
     // MARK: Playback
 
-    func play(item: PlexMetadata, resumeAt: CMTime? = nil) {
+    func playSingle(_ item: PlexMetadata) {
+        playQueue = [item]
+        queueIndex = 0
+        startPlayback(item, resumeAt: nil)
+    }
+
+    func playAll(_ items: [PlexMetadata], shuffle: Bool) {
+        var queue = items.filter { $0.isPlayable }
+        guard !queue.isEmpty else { return }
+        if shuffle { queue.shuffle() }
+        playQueue = queue
+        queueIndex = 0
+        startPlayback(queue[0], resumeAt: nil)
+    }
+
+    private func advanceQueue() {
+        queueIndex += 1
+        if queueIndex < playQueue.count {
+            startPlayback(playQueue[queueIndex], resumeAt: nil)
+        } else {
+            closePlayer()
+        }
+    }
+
+    private func startPlayback(_ item: PlexMetadata, resumeAt: CMTime?) {
         guard let base = baseURL, let token = serverToken,
               let url = api.playbackURL(base: base, token: token, item: item, quality: quality) else { return }
         let player = AVPlayer(url: url)
@@ -270,6 +414,7 @@ final class PlexPlayerViewModel: ObservableObject {
             ? [item.grandparentTitle, item.title].compactMap { $0 }.joined(separator: " — ")
             : item.title
         observePlayback(player)
+        observeEnd(of: player)
         withAnimation(.easeInOut(duration: 0.25)) {
             self.player = player
             isPlayerMinimized = false
@@ -285,22 +430,28 @@ final class PlexPlayerViewModel: ObservableObject {
         }
     }
 
+    private func observeEnd(of player: AVPlayer) {
+        if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
+        endObserver = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemDidPlayToEndTime, object: player.currentItem, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.advanceQueue() }
+        }
+    }
+
     func togglePlayPause() {
         guard let player else { return }
         if player.timeControlStatus == .playing { player.pause() } else { player.play() }
     }
 
-    func minimizePlayer() {
-        withAnimation(.easeInOut(duration: 0.25)) { isPlayerMinimized = true }
-    }
-
-    func expandPlayer() {
-        withAnimation(.easeInOut(duration: 0.25)) { isPlayerMinimized = false }
-    }
+    func minimizePlayer() { withAnimation(.easeInOut(duration: 0.25)) { isPlayerMinimized = true } }
+    func expandPlayer() { withAnimation(.easeInOut(duration: 0.25)) { isPlayerMinimized = false } }
 
     func closePlayer() {
         statusObservation?.invalidate()
         statusObservation = nil
+        if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
+        endObserver = nil
         player?.pause()
         withAnimation(.easeInOut(duration: 0.25)) {
             player = nil
@@ -309,13 +460,15 @@ final class PlexPlayerViewModel: ObservableObject {
         nowPlayingTitle = nil
         nowPlayingItem = nil
         isPlaying = false
+        playQueue = []
+        queueIndex = 0
     }
 
     func setQuality(_ newQuality: PlexQuality) {
         guard newQuality != quality else { return }
         quality = newQuality
         guard let item = nowPlayingItem, let player else { return }
-        play(item: item, resumeAt: player.currentTime())
+        startPlayback(item, resumeAt: player.currentTime())
     }
 
     func presentInfo() {
@@ -328,6 +481,21 @@ final class PlexPlayerViewModel: ObservableObject {
         } else {
             infoItem = item
         }
+    }
+
+    // MARK: Error classification
+
+    private func classify(_ error: Error) -> String {
+        if let urlError = error as? URLError {
+            switch urlError.code {
+            case .timedOut, .cannotConnectToHost, .cannotFindHost,
+                 .networkConnectionLost, .notConnectedToInternet, .dnsLookupFailed:
+                return "No response from the server (couldn't connect)."
+            default:
+                return urlError.localizedDescription
+            }
+        }
+        return error.localizedDescription
     }
 }
 
@@ -343,12 +511,8 @@ struct PlexPlayerContainerView: View {
                 .safeAreaInset(edge: .bottom) { miniBar }
         }
         .overlay { fullPlayer }
-        .sheet(isPresented: $model.showLibraryPicker) {
-            LibraryPickerView(model: model)
-        }
-        .sheet(item: $model.infoItem) { item in
-            MediaInfoView(item: item)
-        }
+        .sheet(isPresented: $model.showLibraryPicker) { LibraryPickerView(model: model) }
+        .sheet(item: $model.infoItem) { item in MediaInfoView(item: item) }
         .onAppear { model.start() }
     }
 
@@ -375,16 +539,14 @@ struct PlexPlayerContainerView: View {
     @ViewBuilder
     private var miniBar: some View {
         if model.player != nil && model.isPlayerMinimized {
-            MiniPlayerBar(model: model)
-                .transition(.move(edge: .bottom))
+            MiniPlayerBar(model: model).transition(.move(edge: .bottom))
         }
     }
 
     @ViewBuilder
     private var fullPlayer: some View {
         if model.player != nil && !model.isPlayerMinimized {
-            FullPlayerView(model: model)
-                .transition(.opacity)
+            FullPlayerView(model: model).transition(.opacity)
         }
     }
 }
@@ -395,18 +557,14 @@ private struct SignInView: View {
     @ObservedObject var model: PlexPlayerViewModel
     var body: some View {
         VStack(spacing: 16) {
-            Image(systemName: "play.circle.fill")
-                .font(.system(size: 56)).foregroundStyle(.orange)
+            Image(systemName: "play.circle.fill").font(.system(size: 56)).foregroundStyle(.orange)
             Text("Plex Player").font(.title2).bold()
             Text("Sign in to browse and play your Plex library natively.")
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .frame(maxWidth: 320)
+                .foregroundStyle(.secondary).multilineTextAlignment(.center).frame(maxWidth: 320)
             Button("Sign in to Plex") { model.beginLinking() }
                 .buttonStyle(.borderedProminent)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .padding()
+        .frame(maxWidth: .infinity, maxHeight: .infinity).padding()
     }
 }
 
@@ -418,20 +576,15 @@ private struct LinkingView: View {
             ProgressView()
             Text("Waiting for Plex sign-in…").font(.headline)
             Text("A browser window opened to link this app. If it didn't, go to plex.tv/link and enter this code:")
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .frame(maxWidth: 340)
+                .foregroundStyle(.secondary).multilineTextAlignment(.center).frame(maxWidth: 340)
             Text(code.uppercased())
-                .font(.system(.largeTitle, design: .monospaced)).bold()
-                .tracking(4)
-                .textSelection(.enabled)
+                .font(.system(.largeTitle, design: .monospaced)).bold().tracking(4).textSelection(.enabled)
             HStack {
                 Button("Reopen link page") { model.reopenLinkPage() }
                 Button("Cancel", role: .cancel) { model.cancelLinking() }
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .padding()
+        .frame(maxWidth: .infinity, maxHeight: .infinity).padding()
     }
 }
 
@@ -440,17 +593,14 @@ private struct ErrorView: View {
     let message: String
     var body: some View {
         VStack(spacing: 14) {
-            Image(systemName: "exclamationmark.triangle")
-                .font(.system(size: 40)).foregroundStyle(.yellow)
+            Image(systemName: "exclamationmark.triangle").font(.system(size: 40)).foregroundStyle(.yellow)
             Text(message).multilineTextAlignment(.center).frame(maxWidth: 340)
             HStack {
-                Button("Retry") { Task { await model.connect() } }
-                    .buttonStyle(.borderedProminent)
+                Button("Retry") { Task { await model.connect() } }.buttonStyle(.borderedProminent)
                 Button("Sign out") { model.signOut() }
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .padding()
+        .frame(maxWidth: .infinity, maxHeight: .infinity).padding()
     }
 }
 
@@ -458,43 +608,34 @@ private struct ErrorView: View {
 
 private struct BrowseView: View {
     @ObservedObject var model: PlexPlayerViewModel
-    private let columns = [GridItem(.adaptive(minimum: 140), spacing: 16)]
 
     var body: some View {
         VStack(spacing: 0) {
             toolbar
             Divider()
-            ScrollView {
-                if let level = model.stack.last {
-                    LazyVGrid(columns: columns, spacing: 16) {
-                        ForEach(level.items) { item in
-                            PosterCard(model: model, item: item) { model.open(item: item) }
-                        }
-                    }
-                    .padding()
-                } else {
-                    home
-                }
+            if let level = model.stack.last {
+                DrillView(model: model, level: level)
+            } else if case .library = model.mode {
+                LibraryRootView(model: model)
+            } else {
+                ScrollView { HomeView(model: model) }
             }
         }
     }
 
     private var toolbar: some View {
         HStack(spacing: 10) {
-            // Top-left library dropdown.
-            Button {
-                model.showLibraryPicker = true
-            } label: {
+            Button { model.showLibraryPicker = true } label: {
                 HStack(spacing: 5) {
                     Image(systemName: "rectangle.stack")
-                    Text(model.currentLibraryTitle).fontWeight(.semibold)
+                    Text(model.navTitle).fontWeight(.semibold)
                     Image(systemName: "chevron.down").font(.caption2)
                 }
             }
             .buttonStyle(.borderless)
             .help("Choose library")
 
-            if model.stack.count > 1 {
+            if !model.stack.isEmpty {
                 Image(systemName: "chevron.right").font(.caption2).foregroundStyle(.secondary)
                 Button { model.back() } label: {
                     Label(model.stack.last?.title ?? "", systemImage: "chevron.left")
@@ -505,36 +646,29 @@ private struct BrowseView: View {
             Spacer()
 
             Menu {
-                Button("Reload") { Task { await model.loadHome() } }
+                Button("Reload") { model.loadLibraryTab() }
                 Button("Sign out", role: .destructive) { model.signOut() }
             } label: {
                 Image(systemName: "ellipsis.circle")
             }
             .fixedSize()
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(.bar)
+        .padding(.horizontal, 12).padding(.vertical, 8).background(.bar)
     }
+}
 
-    @ViewBuilder
-    private var home: some View {
+private struct HomeView: View {
+    @ObservedObject var model: PlexPlayerViewModel
+    var body: some View {
         VStack(alignment: .leading, spacing: 20) {
-            if !model.onDeck.isEmpty {
-                HubRow(model: model, title: "On Deck", items: model.onDeck)
-            }
-            if !model.recentlyAdded.isEmpty {
-                HubRow(model: model, title: "Recently Added", items: model.recentlyAdded)
-            }
+            if !model.onDeck.isEmpty { HubRail(model: model, title: "On Deck", items: model.onDeck) }
+            if !model.recentlyAdded.isEmpty { HubRail(model: model, title: "Recently Added", items: model.recentlyAdded) }
             if !model.sections.isEmpty {
                 VStack(alignment: .leading, spacing: 8) {
                     Text("Libraries").font(.title3).bold()
                     ForEach(model.sections) { section in
-                        Button {
-                            model.openHomeSection(section)
-                        } label: {
-                            Label(section.title, systemImage: section.symbolName)
-                                .padding(.vertical, 4)
+                        Button { model.openHomeSection(section) } label: {
+                            Label(section.title, systemImage: section.symbolName).padding(.vertical, 4)
                         }
                         .buttonStyle(.plain)
                     }
@@ -544,16 +678,193 @@ private struct BrowseView: View {
                 Text("Nothing to show yet.").foregroundStyle(.secondary)
             }
         }
-        .padding()
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding().frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
-private struct HubRow: View {
+// MARK: - Library root (tabbed)
+
+private struct LibraryRootView: View {
+    @ObservedObject var model: PlexPlayerViewModel
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Picker("", selection: Binding(get: { model.libraryTab }, set: { model.setLibraryTab($0) })) {
+                ForEach(PlexPlayerViewModel.LibraryTab.allCases) { tab in
+                    Text(tab.rawValue).tag(tab)
+                }
+            }
+            .pickerStyle(.segmented)
+            .padding(.horizontal, 12).padding(.vertical, 8)
+
+            Divider()
+
+            switch model.libraryTab {
+            case .recommended: RecommendedTab(model: model)
+            case .browse: BrowseTab(model: model)
+            case .playlists: PlaylistsTab(model: model)
+            }
+        }
+    }
+}
+
+private struct RecommendedTab: View {
+    @ObservedObject var model: PlexPlayerViewModel
+    var body: some View {
+        if model.tabLoading && model.recommendedHubs.isEmpty {
+            LoadingBanner(text: "Loading recommendations…")
+        } else if model.recommendedHubs.isEmpty {
+            EmptyBanner(text: "No recommendations for this library.")
+        } else {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    ForEach(model.recommendedHubs) { hub in
+                        HubRail(model: model, title: hub.title ?? "", items: hub.metadata ?? [])
+                    }
+                }
+                .padding()
+            }
+        }
+    }
+}
+
+private struct BrowseTab: View {
+    @ObservedObject var model: PlexPlayerViewModel
+    private let columns = [GridItem(.adaptive(minimum: 140), spacing: 16)]
+
+    var body: some View {
+        VStack(spacing: 0) {
+            controls
+            Divider()
+            switch model.libraryLoadState {
+            case .connecting:
+                LoadingBanner(text: "Contacting server…")
+            case .downloading:
+                LoadingBanner(text: "Downloading library…")
+            case .failed(let message):
+                VStack(spacing: 12) {
+                    Text(message).multilineTextAlignment(.center).foregroundStyle(.secondary)
+                    Button("Retry") { model.loadBrowse() }.buttonStyle(.borderedProminent)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity).padding()
+            case .idle, .ready:
+                if model.browseItems.isEmpty {
+                    EmptyBanner(text: "This library is empty.")
+                } else {
+                    ScrollView {
+                        LazyVGrid(columns: columns, spacing: 16) {
+                            ForEach(model.browseItems) { item in
+                                PosterCard(model: model, item: item) { model.open(item: item) }
+                            }
+                        }
+                        .padding()
+                    }
+                }
+            }
+        }
+    }
+
+    private var controls: some View {
+        HStack(spacing: 10) {
+            Menu {
+                Picker("Sort by", selection: Binding(get: { model.sortField }, set: { model.setSortField($0) })) {
+                    ForEach(PlexSortField.allCases) { field in Text(field.rawValue).tag(field) }
+                }
+                .pickerStyle(.inline)
+                Divider()
+                Picker("Order", selection: Binding(get: { model.sortAscending }, set: { model.setSortAscending($0) })) {
+                    Text("Ascending").tag(true)
+                    Text("Descending").tag(false)
+                }
+                .pickerStyle(.inline)
+            } label: {
+                Label("\(model.sortField.rawValue) \(model.sortAscending ? "↑" : "↓")",
+                      systemImage: "arrow.up.arrow.down")
+            }
+            .fixedSize()
+
+            if model.isShowLibrary {
+                Picker("", selection: Binding(get: { model.tvEpisodes }, set: { model.setTVEpisodes($0) })) {
+                    Text("Shows").tag(false)
+                    Text("Episodes").tag(true)
+                }
+                .pickerStyle(.segmented)
+                .fixedSize()
+            }
+
+            Spacer()
+
+            Button { model.playAll(model.browseItems, shuffle: false) } label: {
+                Label("Play All", systemImage: "play.fill")
+            }
+            .disabled(!model.browseItems.contains { $0.isPlayable })
+            Button { model.playAll(model.browseItems, shuffle: true) } label: {
+                Label("Shuffle", systemImage: "shuffle")
+            }
+            .disabled(!model.browseItems.contains { $0.isPlayable })
+        }
+        .buttonStyle(.borderless)
+        .padding(.horizontal, 12).padding(.vertical, 8)
+    }
+}
+
+private struct PlaylistsTab: View {
+    @ObservedObject var model: PlexPlayerViewModel
+    private let columns = [GridItem(.adaptive(minimum: 160), spacing: 16)]
+    var body: some View {
+        if model.tabLoading && model.playlists.isEmpty {
+            LoadingBanner(text: "Loading playlists…")
+        } else if model.playlists.isEmpty {
+            EmptyBanner(text: "No playlists on this server.")
+        } else {
+            ScrollView {
+                LazyVGrid(columns: columns, spacing: 16) {
+                    ForEach(model.playlists) { playlist in
+                        PosterCard(model: model, item: playlist, width: 150) { model.openPlaylist(playlist) }
+                    }
+                }
+                .padding()
+            }
+        }
+    }
+}
+
+private struct DrillView: View {
+    @ObservedObject var model: PlexPlayerViewModel
+    let level: PlexPlayerViewModel.BrowseLevel
+    private let columns = [GridItem(.adaptive(minimum: 140), spacing: 16)]
+
+    var body: some View {
+        ScrollView {
+            if level.items.contains(where: { $0.isPlayable }) {
+                HStack {
+                    Button { model.playAll(level.items, shuffle: false) } label: {
+                        Label("Play All", systemImage: "play.fill")
+                    }
+                    Button { model.playAll(level.items, shuffle: true) } label: {
+                        Label("Shuffle", systemImage: "shuffle")
+                    }
+                    Spacer()
+                }
+                .buttonStyle(.borderless)
+                .padding([.horizontal, .top])
+            }
+            LazyVGrid(columns: columns, spacing: 16) {
+                ForEach(level.items) { item in
+                    PosterCard(model: model, item: item) { model.open(item: item) }
+                }
+            }
+            .padding()
+        }
+    }
+}
+
+// MARK: - Reusable rows / cards / banners
+
+private struct HubRail: View {
     @ObservedObject var model: PlexPlayerViewModel
     let title: String
     let items: [PlexMetadata]
-
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(title).font(.title3).bold()
@@ -579,24 +890,20 @@ private struct PosterCard: View {
             VStack(alignment: .leading, spacing: 6) {
                 ZStack {
                     RoundedRectangle(cornerRadius: 8).fill(Palette.selectedControl)
-                    AsyncImage(url: model.imageURL(for: item.thumb)) { image in
+                    AsyncImage(url: model.imageURL(for: item.posterPath)) { image in
                         image.resizable().aspectRatio(contentMode: .fill)
                     } placeholder: {
-                        Image(systemName: item.isPlayable ? "play.rectangle" : "square.stack")
-                            .font(.largeTitle).foregroundStyle(.secondary)
+                        Image(systemName: placeholderSymbol).font(.largeTitle).foregroundStyle(.secondary)
                     }
                     if item.isPlayable {
                         Image(systemName: "play.circle.fill")
-                            .font(.system(size: 30))
-                            .foregroundStyle(.white.opacity(0.9))
-                            .shadow(radius: 3)
+                            .font(.system(size: 30)).foregroundStyle(.white.opacity(0.9)).shadow(radius: 3)
                     }
                 }
                 .frame(width: width, height: width * 1.5)
                 .clipShape(RoundedRectangle(cornerRadius: 8))
 
-                Text(item.title).font(.caption).bold().lineLimit(1)
-                    .frame(width: width, alignment: .leading)
+                Text(item.title).font(.caption).bold().lineLimit(1).frame(width: width, alignment: .leading)
                 if let subtitle = item.subtitle {
                     Text(subtitle).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
                         .frame(width: width, alignment: .leading)
@@ -604,6 +911,30 @@ private struct PosterCard: View {
             }
         }
         .buttonStyle(.plain)
+    }
+
+    private var placeholderSymbol: String {
+        if item.isPlaylist { return "music.note.list" }
+        return item.isPlayable ? "play.rectangle" : "square.stack"
+    }
+}
+
+private struct LoadingBanner: View {
+    let text: String
+    var body: some View {
+        VStack(spacing: 12) {
+            ProgressView()
+            Text(text).foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity).padding()
+    }
+}
+
+private struct EmptyBanner: View {
+    let text: String
+    var body: some View {
+        Text(text).foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, maxHeight: .infinity).padding()
     }
 }
 
@@ -619,21 +950,16 @@ private struct LibraryPickerView: View {
         NavigationStack {
             List {
                 Section {
-                    Button {
-                        model.selectHome()
-                    } label: {
-                        Label("Home", systemImage: "house")
-                    }
+                    Button { model.selectHome() } label: { Label("Home", systemImage: "house") }
                 }
 
                 Section("Favorites") {
                     if prefs.favorites.isEmpty {
-                        Text("No favorites yet. Tap the heart next to a library in All Libraries.")
+                        Text("No favorites yet. Tap the heart next to a library below.")
                             .font(.footnote).foregroundStyle(.secondary)
                     } else {
                         ForEach(prefs.favorites) { ref in
-                            LibraryRow(ref: ref,
-                                       isFavorite: true,
+                            LibraryRow(ref: ref, isFavorite: true,
                                        onSelect: { model.select(library: ref) },
                                        onToggleFavorite: { prefs.toggleFavorite(ref) })
                         }
@@ -649,8 +975,7 @@ private struct LibraryPickerView: View {
                         HStack {
                             Label("Browse all servers", systemImage: "square.stack.3d.up")
                             Spacer()
-                            Image(systemName: showAll ? "chevron.down" : "chevron.right")
-                                .foregroundStyle(.secondary)
+                            Image(systemName: showAll ? "chevron.down" : "chevron.right").foregroundStyle(.secondary)
                         }
                     }
                     .buttonStyle(.plain)
@@ -663,15 +988,11 @@ private struct LibraryPickerView: View {
                                 Text(server.name).font(.subheadline).bold()
                             }
                             if libs.isEmpty {
-                                HStack(spacing: 6) {
-                                    ProgressView().controlSize(.small)
-                                    Text("Loading…").foregroundStyle(.secondary)
-                                }
+                                HStack(spacing: 6) { ProgressView().controlSize(.small); Text("Loading…").foregroundStyle(.secondary) }
                             } else {
                                 ForEach(libs) { section in
                                     let ref = model.makeRef(server: server, section: section)
-                                    LibraryRow(ref: ref,
-                                               isFavorite: prefs.isFavorite(ref),
+                                    LibraryRow(ref: ref, isFavorite: prefs.isFavorite(ref),
                                                onSelect: { model.select(library: ref) },
                                                onToggleFavorite: { prefs.toggleFavorite(ref) })
                                 }
@@ -702,10 +1023,8 @@ private struct LibraryRow: View {
 
     var body: some View {
         HStack {
-            Button(action: onSelect) {
-                Label(ref.title, systemImage: ref.symbolName)
-            }
-            .buttonStyle(.plain)
+            Button(action: onSelect) { Label(ref.title, systemImage: ref.symbolName) }
+                .buttonStyle(.plain)
             Spacer()
             Button(action: onToggleFavorite) {
                 Image(systemName: isFavorite ? "heart.fill" : "heart")
@@ -721,7 +1040,6 @@ private struct LibraryRow: View {
 
 private struct MiniPlayerBar: View {
     @ObservedObject var model: PlexPlayerViewModel
-
     var body: some View {
         HStack(spacing: 12) {
             if let player = model.player {
@@ -739,20 +1057,12 @@ private struct MiniPlayerBar: View {
                 Image(systemName: model.isPlaying ? "pause.fill" : "play.fill").font(.title3)
             }
             .buttonStyle(.borderless)
-            Button { model.expandPlayer() } label: {
-                Image(systemName: "chevron.up").font(.title3)
-            }
-            .buttonStyle(.borderless)
-            .help("Expand")
-            Button { model.closePlayer() } label: {
-                Image(systemName: "xmark").font(.title3)
-            }
-            .buttonStyle(.borderless)
-            .help("Stop")
+            Button { model.expandPlayer() } label: { Image(systemName: "chevron.up").font(.title3) }
+                .buttonStyle(.borderless).help("Expand")
+            Button { model.closePlayer() } label: { Image(systemName: "xmark").font(.title3) }
+                .buttonStyle(.borderless).help("Stop")
         }
-        .padding(8)
-        .background(.bar)
-        .overlay(alignment: .top) { Divider() }
+        .padding(8).background(.bar).overlay(alignment: .top) { Divider() }
         .contentShape(Rectangle())
         .onTapGesture { model.expandPlayer() }
     }
@@ -762,39 +1072,24 @@ private struct MiniPlayerBar: View {
 
 private struct FullPlayerView: View {
     @ObservedObject var model: PlexPlayerViewModel
-
     var body: some View {
         ZStack(alignment: .top) {
             Color.black.ignoresSafeArea()
-            if let player = model.player {
-                VideoPlayer(player: player).ignoresSafeArea()
-            }
+            if let player = model.player { VideoPlayer(player: player).ignoresSafeArea() }
             controlBar
         }
     }
 
     private var controlBar: some View {
         HStack(spacing: 16) {
-            Button { model.minimizePlayer() } label: {
-                Image(systemName: "chevron.down").font(.title3)
-            }
-            .help("Minimize")
-
-            Text(model.nowPlayingTitle ?? "")
-                .font(.headline).lineLimit(1)
-
+            Button { model.minimizePlayer() } label: { Image(systemName: "chevron.down").font(.title3) }
+                .help("Minimize")
+            Text(model.nowPlayingTitle ?? "").font(.headline).lineLimit(1)
             Spacer()
-
-            Button { model.presentInfo() } label: {
-                Image(systemName: "info.circle").font(.title3)
-            }
-            .help("Media info")
-
+            Button { model.presentInfo() } label: { Image(systemName: "info.circle").font(.title3) }
+                .help("Media info")
             Menu {
-                Picker("Quality", selection: Binding(
-                    get: { model.quality },
-                    set: { model.setQuality($0) }
-                )) {
+                Picker("Quality", selection: Binding(get: { model.quality }, set: { model.setQuality($0) })) {
                     ForEach(PlexQuality.allCases) { q in Text(q.rawValue).tag(q) }
                 }
             } label: {
@@ -802,19 +1097,14 @@ private struct FullPlayerView: View {
             }
             .menuIndicator(.hidden)
             .help("Playback quality")
-
-            Button { model.closePlayer() } label: {
-                Image(systemName: "xmark").font(.title3)
-            }
-            .help("Stop")
+            Button { model.closePlayer() } label: { Image(systemName: "xmark").font(.title3) }
+                .help("Stop")
         }
         .buttonStyle(.plain)
         .foregroundStyle(.white)
-        .padding(.horizontal, 16)
-        .padding(.vertical, 12)
+        .padding(.horizontal, 16).padding(.vertical, 12)
         .background(
-            LinearGradient(colors: [.black.opacity(0.65), .clear],
-                           startPoint: .top, endPoint: .bottom)
+            LinearGradient(colors: [.black.opacity(0.65), .clear], startPoint: .top, endPoint: .bottom)
                 .ignoresSafeArea(edges: .top)
         )
     }
@@ -825,7 +1115,6 @@ private struct FullPlayerView: View {
 private struct MediaInfoView: View {
     let item: PlexMetadata
     @Environment(\.dismiss) private var dismiss
-
     private var media: PlexMedia? { item.media?.first }
 
     var body: some View {

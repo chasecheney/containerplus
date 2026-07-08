@@ -150,12 +150,56 @@ final class PlexAPI {
         try await metadataList(path: "/library/recentlyAdded", base: base, token: token)
     }
 
-    func sectionItems(base: URL, token: String, sectionKey: String) async throws -> [PlexMetadata] {
-        try await metadataList(path: "/library/sections/\(sectionKey)/all", base: base, token: token)
+    /// All items in a section, optionally filtered by `type` (1 = movie,
+    /// 2 = show, 4 = episode) and sorted (e.g. "addedAt:desc"). Uses a
+    /// progress-aware fetch that won't time out on large libraries and reports
+    /// when the server starts responding.
+    func sectionItems(base: URL, token: String, sectionKey: String,
+                      type: Int?, sort: String?,
+                      onResponse: @escaping () -> Void = {}) async throws -> [PlexMetadata] {
+        var params: [String] = []
+        if let type { params.append("type=\(type)") }
+        if let sort, !sort.isEmpty { params.append("sort=\(sort)") }
+        let path = "/library/sections/\(sectionKey)/all"
+            + (params.isEmpty ? "" : "?" + params.joined(separator: "&"))
+        return try await fetchMetadataList(path: path, base: base, token: token, onResponse: onResponse)
     }
 
     func children(base: URL, token: String, ratingKey: String) async throws -> [PlexMetadata] {
         try await metadataList(path: "/library/metadata/\(ratingKey)/children", base: base, token: token)
+    }
+
+    func hubs(base: URL, token: String, sectionKey: String) async throws -> [PlexHub] {
+        let url = URL(string: base.absoluteString + "/hubs/sections/\(sectionKey)?count=20")!
+        let response: MediaContainerResponse = try await get(url, token: token)
+        return response.mediaContainer.hub ?? []
+    }
+
+    func playlists(base: URL, token: String) async throws -> [PlexMetadata] {
+        let url = URL(string: base.absoluteString + "/playlists")!
+        let response: MediaContainerResponse = try await get(url, token: token)
+        return response.mediaContainer.metadata ?? []
+    }
+
+    func playlistItems(base: URL, token: String, ratingKey: String) async throws -> [PlexMetadata] {
+        try await fetchMetadataList(path: "/playlists/\(ratingKey)/items", base: base, token: token)
+    }
+
+    /// Fetch a metadata list with a generous timeout and a hook that fires the
+    /// moment response headers arrive (so callers can distinguish "still
+    /// waiting to connect" from "downloading the body").
+    func fetchMetadataList(path: String, base: URL, token: String,
+                           timeout: TimeInterval = 120,
+                           onResponse: @escaping () -> Void = {}) async throws -> [PlexMetadata] {
+        let url = URL(string: base.absoluteString + path)!
+        var req = URLRequest(url: url, timeoutInterval: timeout)
+        for (k, v) in headers(token: token) { req.setValue(v, forHTTPHeaderField: k) }
+        let observer = PlexResponseObserver(onResponse: onResponse)
+        let (data, resp) = try await URLSession.shared.data(for: req, delegate: observer)
+        guard let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            throw PlexError.http((resp as? HTTPURLResponse)?.statusCode ?? -1)
+        }
+        return try JSONDecoder().decode(MediaContainerResponse.self, from: data).mediaContainer.metadata ?? []
     }
 
     /// Full metadata for one item (includes Media/Part technical fields + file path).
@@ -246,5 +290,38 @@ enum PlexQuality: String, CaseIterable, Identifiable {
         case .p720: return "1280x720"
         case .p480: return "720x480"
         }
+    }
+}
+
+/// Sortable fields for the Browse tab.
+enum PlexSortField: String, CaseIterable, Identifiable {
+    case name = "Name"
+    case releaseDate = "Release Date"
+    case dateAdded = "Date Added"
+
+    var id: String { rawValue }
+
+    var key: String {
+        switch self {
+        case .name: return "titleSort"
+        case .releaseDate: return "originallyAvailableAt"
+        case .dateAdded: return "addedAt"
+        }
+    }
+}
+
+/// Per-task delegate that reports when the server's response headers arrive,
+/// letting callers tell "no response yet" apart from "downloading".
+final class PlexResponseObserver: NSObject, URLSessionDataDelegate {
+    private let onResponse: () -> Void
+    private var fired = false
+
+    init(onResponse: @escaping () -> Void) { self.onResponse = onResponse }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask,
+                    didReceive response: URLResponse,
+                    completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+        if !fired { fired = true; onResponse() }
+        completionHandler(.allow)
     }
 }
