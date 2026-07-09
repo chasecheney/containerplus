@@ -105,6 +105,13 @@ final class PlexPlayerViewModel: ObservableObject {
     private let browsePageSize = 300
     private var browseKey = ""
 
+    // Search (within the current library)
+    @Published var searchText = "" { didSet { scheduleSearch() } }
+    @Published private(set) var searchResults: [PlexMetadata] = []
+    @Published private(set) var searchActive = false
+    @Published private(set) var searching = false
+    private var searchTask: Task<Void, Never>?
+
     // Player
     @Published var player: AVPlayer?
     @Published private(set) var nowPlayingTitle: String?
@@ -357,6 +364,7 @@ final class PlexPlayerViewModel: ObservableObject {
             saveCachedConnection(serverID: ref.serverID, name: ref.serverName, base: conn.base, token: conn.token)
             mode = .library(ref)
             stack = []
+            searchText = ""
             // Restore the remembered sort field and its remembered/default direction.
             sortField = prefs.sortField
             sortAscending = prefs.ascending(for: sortField)
@@ -526,6 +534,43 @@ final class PlexPlayerViewModel: ObservableObject {
                 browseNet.phase = "failed"
                 browseNet.error = classify(error)
             }
+        }
+    }
+
+    // MARK: Search
+
+    /// Items to show in Browse: search results when a search is active.
+    var displayedBrowseItems: [PlexMetadata] { searchActive ? searchResults : browseItems }
+
+    func clearSearch() { searchText = "" }
+
+    /// Debounced; all state changes happen inside the Task so they never fire
+    /// during the text field's view update.
+    private func scheduleSearch() {
+        searchTask?.cancel()
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        searchTask = Task {
+            if query.isEmpty {
+                searchActive = false
+                searching = false
+                searchResults = []
+                return
+            }
+            searchActive = true
+            searching = true
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            if Task.isCancelled { return }
+            guard let ref = currentLibrary, let base = baseURL, let token = serverToken else {
+                searching = false
+                return
+            }
+            let type: Int? = ref.type == "show" ? (tvEpisodes ? 4 : 2) : nil
+            let results = (try? await api.searchLibrary(base: base, token: token,
+                                                        sectionKey: ref.sectionKey,
+                                                        type: type, query: query)) ?? []
+            if Task.isCancelled { return }
+            searchResults = results
+            searching = false
         }
     }
 
@@ -1097,13 +1142,53 @@ private struct BrowseTab: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            searchBar
             controls
             Divider()
             ZStack(alignment: .bottom) {
-                loadStateContent
+                if model.searchActive { searchContent } else { loadStateContent }
                 if model.showNetDebug {
                     NetDebugBar(stat: model.browseNet).padding(8)
                 }
+            }
+        }
+    }
+
+    private var searchBar: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+            TextField("Search this library by title", text: $model.searchText)
+                .textFieldStyle(.plain)
+                #if os(iOS)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                #endif
+            if !model.searchText.isEmpty {
+                Button { model.clearSearch() } label: {
+                    Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
+                }
+                .buttonStyle(.borderless)
+            }
+        }
+        .padding(.horizontal, 10).padding(.vertical, 6)
+        .background(Palette.selectedControl, in: RoundedRectangle(cornerRadius: 8))
+        .padding(.horizontal, 12).padding(.top, 8)
+    }
+
+    @ViewBuilder
+    private var searchContent: some View {
+        if model.searching && model.searchResults.isEmpty {
+            LoadingBanner(text: "Searching…")
+        } else if model.searchResults.isEmpty {
+            EmptyBanner(text: "No results for “\(model.searchText)”.")
+        } else {
+            ScrollView {
+                LazyVGrid(columns: columns, spacing: 16) {
+                    ForEach(model.searchResults) { item in
+                        PosterCard(model: model, item: item) { model.open(item: item) }
+                    }
+                }
+                .padding()
             }
         }
     }
@@ -1171,14 +1256,14 @@ private struct BrowseTab: View {
 
             Spacer()
 
-            Button { model.playAll(model.browseItems, shuffle: false) } label: {
+            Button { model.playAll(model.displayedBrowseItems, shuffle: false) } label: {
                 Label("Play All", systemImage: "play.fill")
             }
-            .disabled(!model.browseItems.contains { $0.isPlayable })
-            Button { model.playAll(model.browseItems, shuffle: true) } label: {
+            .disabled(!model.displayedBrowseItems.contains { $0.isPlayable })
+            Button { model.playAll(model.displayedBrowseItems, shuffle: true) } label: {
                 Label("Shuffle", systemImage: "shuffle")
             }
-            .disabled(!model.browseItems.contains { $0.isPlayable })
+            .disabled(!model.displayedBrowseItems.contains { $0.isPlayable })
         }
         .buttonStyle(.borderless)
         .padding(.horizontal, 12).padding(.vertical, 8)
