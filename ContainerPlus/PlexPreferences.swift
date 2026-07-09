@@ -13,9 +13,17 @@ final class PlexPreferences: ObservableObject {
     /// Per-field sort direction the user has chosen (keyed by field raw value).
     private var sortDirections: [String: Bool] = [:]
 
+    // App settings
+    @Published private(set) var showDeleteOption = false
+    @Published private(set) var preferredQuality: PlexQuality = .original
+    @Published private(set) var showNetworkDebug = false
+
     private let favoritesKey = "plex.favoriteLibraries"
     private let sortFieldKey = "plex.sortField"
     private let sortDirectionsKey = "plex.sortDirections"
+    private let showDeleteKey = "plex.showDeleteOption"
+    private let preferredQualityKey = "plex.preferredQuality"
+    private let showNetDebugKey = "plex.showNetworkDebug"
 
     private init() {
         if let data = UserDefaults.standard.data(forKey: favoritesKey),
@@ -30,6 +38,29 @@ final class PlexPreferences: ObservableObject {
            let decoded = try? JSONDecoder().decode([String: Bool].self, from: data) {
             sortDirections = decoded
         }
+        showDeleteOption = UserDefaults.standard.bool(forKey: showDeleteKey)
+        showNetworkDebug = UserDefaults.standard.bool(forKey: showNetDebugKey)
+        if let raw = UserDefaults.standard.string(forKey: preferredQualityKey),
+           let quality = PlexQuality(rawValue: raw) {
+            preferredQuality = quality
+        }
+    }
+
+    // MARK: App settings
+
+    func setShowDeleteOption(_ value: Bool) {
+        showDeleteOption = value
+        UserDefaults.standard.set(value, forKey: showDeleteKey)
+    }
+
+    func setShowNetworkDebug(_ value: Bool) {
+        showNetworkDebug = value
+        UserDefaults.standard.set(value, forKey: showNetDebugKey)
+    }
+
+    func setPreferredQuality(_ quality: PlexQuality) {
+        preferredQuality = quality
+        UserDefaults.standard.set(quality.rawValue, forKey: preferredQualityKey)
     }
 
     // MARK: Sorting

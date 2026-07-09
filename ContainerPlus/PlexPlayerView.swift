@@ -97,8 +97,7 @@ final class PlexPlayerViewModel: ObservableObject {
     @Published private(set) var browseHasMore = false
     @Published private(set) var browseLoadingMore = false
 
-    // Network debug overlay
-    @Published var showNetDebug = false
+    // Network debug overlay (toggle lives in Settings / PlexPreferences)
     @Published private(set) var browseNet = NetStat()
     @Published private(set) var recommendedNet = NetStat()
 
@@ -118,7 +117,7 @@ final class PlexPlayerViewModel: ObservableObject {
     @Published private(set) var nowPlayingItem: PlexMetadata?
     @Published var isPlayerMinimized = false
     @Published private(set) var isPlaying = false
-    @Published private(set) var quality: PlexQuality = .original
+    @Published private(set) var quality: PlexQuality = PlexPreferences.shared.preferredQuality
     /// App-level playback volume (0…1), independent of the device volume.
     @Published private(set) var volume: Double = 1.0
     @Published private(set) var isMuted = false
@@ -134,7 +133,9 @@ final class PlexPlayerViewModel: ObservableObject {
     // Sheets
     @Published var showLibraryPicker = false
     @Published var showQueue = false
+    @Published var showSettings = false
     @Published var infoItem: PlexMetadata?
+    @Published var deleteError: String?
 
     let api = PlexAPI()
     let prefs = PlexPreferences.shared
@@ -879,6 +880,35 @@ final class PlexPlayerViewModel: ObservableObject {
         }
     }
 
+    /// Sets the default streaming rate used for new playback (persisted).
+    func setPreferredStreamingRate(_ newQuality: PlexQuality) {
+        prefs.setPreferredQuality(newQuality)
+        quality = newQuality
+    }
+
+    // MARK: Delete
+
+    func deleteFromPlex(_ item: PlexMetadata) {
+        guard let base = baseURL, let token = serverToken else { return }
+        Task {
+            do {
+                try await api.deleteItem(base: base, token: token, ratingKey: item.ratingKey)
+                // Remove it from anything currently on screen.
+                browseItems.removeAll { $0.id == item.id }
+                searchResults.removeAll { $0.id == item.id }
+                if !stack.isEmpty { stack[stack.count - 1].items.removeAll { $0.id == item.id } }
+                infoItem = nil
+            } catch {
+                infoItem = nil
+                if case PlexError.http(let code) = error, code == 401 || code == 403 {
+                    deleteError = "Deletion is disabled on this server. Enable “Allow media deletion” in the Plex server settings."
+                } else {
+                    deleteError = "Couldn't delete this item. \(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
     // MARK: Error classification
 
     private func classify(_ error: Error) -> String {
@@ -909,7 +939,15 @@ struct PlexPlayerContainerView: View {
         .overlay { fullPlayer }
         .sheet(isPresented: $model.showLibraryPicker) { LibraryPickerView(model: model) }
         .sheet(isPresented: $model.showQueue) { QueueView(model: model) }
-        .sheet(item: $model.infoItem) { item in MediaInfoView(item: item) }
+        .sheet(isPresented: $model.showSettings) { PlexSettingsView(model: model) }
+        .sheet(item: $model.infoItem) { item in MediaInfoView(model: model, item: item) }
+        .alert("Delete Failed",
+               isPresented: Binding(get: { model.deleteError != nil },
+                                    set: { if !$0 { model.deleteError = nil } })) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(model.deleteError ?? "")
+        }
         .onAppear { model.start() }
     }
 
@@ -1044,7 +1082,7 @@ private struct BrowseView: View {
 
             Menu {
                 Button("Reload") { model.loadLibraryTab() }
-                Toggle("Network Debug", isOn: $model.showNetDebug)
+                Button("Settings…") { model.showSettings = true }
                 Button("Sign out", role: .destructive) { model.signOut() }
             } label: {
                 Image(systemName: "ellipsis.circle")
@@ -1108,10 +1146,11 @@ private struct LibraryRootView: View {
 
 private struct RecommendedTab: View {
     @ObservedObject var model: PlexPlayerViewModel
+    @ObservedObject private var prefs = PlexPreferences.shared
     var body: some View {
         ZStack(alignment: .bottom) {
             content
-            if model.showNetDebug {
+            if prefs.showNetworkDebug {
                 NetDebugBar(stat: model.recommendedNet).padding(8)
             }
         }
@@ -1138,6 +1177,7 @@ private struct RecommendedTab: View {
 
 private struct BrowseTab: View {
     @ObservedObject var model: PlexPlayerViewModel
+    @ObservedObject private var prefs = PlexPreferences.shared
     private let columns = [GridItem(.adaptive(minimum: 140), spacing: 16)]
 
     var body: some View {
@@ -1147,7 +1187,7 @@ private struct BrowseTab: View {
             Divider()
             ZStack(alignment: .bottom) {
                 if model.searchActive { searchContent } else { loadStateContent }
-                if model.showNetDebug {
+                if prefs.showNetworkDebug {
                     NetDebugBar(stat: model.browseNet).padding(8)
                 }
             }
@@ -1785,11 +1825,59 @@ private struct QueueView: View {
     }
 }
 
+// MARK: - Settings sheet
+
+private struct PlexSettingsView: View {
+    @ObservedObject var model: PlexPlayerViewModel
+    @ObservedObject private var prefs = PlexPreferences.shared
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    Picker("Preferred streaming rate",
+                           selection: Binding(get: { prefs.preferredQuality },
+                                              set: { model.setPreferredStreamingRate($0) })) {
+                        ForEach(PlexQuality.allCases) { quality in Text(quality.rawValue).tag(quality) }
+                    }
+                } header: {
+                    Text("Playback")
+                } footer: {
+                    Text("Default quality when a video starts. You can still change it during playback.")
+                }
+
+                Section("Display") {
+                    Toggle("Network debug overlay",
+                           isOn: Binding(get: { prefs.showNetworkDebug },
+                                         set: { prefs.setShowNetworkDebug($0) }))
+                }
+
+                Section {
+                    Toggle("Show “Delete from Plex”",
+                           isOn: Binding(get: { prefs.showDeleteOption },
+                                         set: { prefs.setShowDeleteOption($0) }))
+                } header: {
+                    Text("Danger Zone")
+                } footer: {
+                    Text("Adds a delete action to the media info screen. Deleting also requires “Allow media deletion” to be enabled on the Plex server.")
+                }
+            }
+            .navigationTitle("Settings")
+            .toolbar { ToolbarItem { Button("Done") { dismiss() } } }
+        }
+        .frame(minWidth: 420, minHeight: 440)
+    }
+}
+
 // MARK: - Media info sheet
 
 private struct MediaInfoView: View {
+    @ObservedObject var model: PlexPlayerViewModel
+    @ObservedObject private var prefs = PlexPreferences.shared
     let item: PlexMetadata
     @Environment(\.dismiss) private var dismiss
+    @State private var confirmDelete = false
     private var media: PlexMedia? { item.media?.first }
 
     var body: some View {
@@ -1821,9 +1909,26 @@ private struct MediaInfoView: View {
                         }
                     }
                 }
+                if prefs.showDeleteOption {
+                    Section {
+                        Button(role: .destructive) { confirmDelete = true } label: {
+                            Label("Delete from Plex…", systemImage: "trash")
+                        }
+                    } footer: {
+                        Text("Removes the media (and its file) from the server. Requires “Allow media deletion” to be enabled on the server.")
+                    }
+                }
             }
             .navigationTitle("Media Info")
             .toolbar { ToolbarItem { Button("Done") { dismiss() } } }
+            .confirmationDialog("Delete “\(item.title)” from Plex? This can't be undone.",
+                                isPresented: $confirmDelete, titleVisibility: .visible) {
+                Button("Delete", role: .destructive) {
+                    model.deleteFromPlex(item)
+                    dismiss()
+                }
+                Button("Cancel", role: .cancel) {}
+            }
         }
         .frame(minWidth: 420, minHeight: 480)
     }

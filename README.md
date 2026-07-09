@@ -63,7 +63,10 @@ A **native** Plex client (no web view) built on the Plex API and `AVPlayer`:
 - **Queue**: long-press a poster for "Play Next" / "Add to Queue"; the hamburger
   button shows the up-next list (tap to jump, swipe to remove).
 - **Media info**: the ℹ️ button shows resolution, codecs, bitrate, container,
-  size, and the file's name/path.
+  size, and the file's name/path — and, if enabled in Settings, a
+  **Delete from Plex** action (confirmed; requires the server to allow deletion).
+- **Settings** (… menu): preferred default streaming rate, show/hide the
+  network debug overlay, and opt in to the delete action. All persisted.
 - **Play** in an `AVPlayer`, resuming from the last watched offset. Direct play
   is used for AVFoundation-friendly containers (mp4/mov/m4v); everything else
   falls back to the Plex universal transcoder (HLS).

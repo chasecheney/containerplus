@@ -247,6 +247,18 @@ final class PlexAPI {
         try await metadataList(path: "/library/metadata/\(ratingKey)", base: base, token: token).first
     }
 
+    /// Deletes a media item (and its file, if the server allows deletion).
+    func deleteItem(base: URL, token: String, ratingKey: String) async throws {
+        let url = URL(string: base.absoluteString + "/library/metadata/\(ratingKey)")!
+        var req = URLRequest(url: url, timeoutInterval: 30)
+        req.httpMethod = "DELETE"
+        for (k, v) in headers(token: token) { req.setValue(v, forHTTPHeaderField: k) }
+        let (_, resp) = try await URLSession.shared.data(for: req)
+        guard let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            throw PlexError.http((resp as? HTTPURLResponse)?.statusCode ?? -1)
+        }
+    }
+
     private func metadataList(path: String, base: URL, token: String) async throws -> [PlexMetadata] {
         let url = URL(string: base.absoluteString + path)!
         let response: MediaContainerResponse = try await get(url, token: token)
