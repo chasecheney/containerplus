@@ -1,9 +1,8 @@
 import SwiftUI
 
 struct ContentView: View {
-    // The two panes default to Plex Web (left) and Web Browser (right),
-    // matching the required first two containers.
-    @StateObject private var left = PaneModel(selection: .plexWeb)
+    // Default panes: native Plex (API) on the left, Web Browser on the right.
+    @StateObject private var left = PaneModel(selection: .plexPlayer)
     @StateObject private var right = PaneModel(selection: .webBrowser)
 
     var body: some View {
