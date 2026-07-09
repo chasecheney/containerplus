@@ -357,8 +357,9 @@ final class PlexPlayerViewModel: ObservableObject {
             saveCachedConnection(serverID: ref.serverID, name: ref.serverName, base: conn.base, token: conn.token)
             mode = .library(ref)
             stack = []
-            sortField = .name
-            sortAscending = true
+            // Restore the remembered sort field and its remembered/default direction.
+            sortField = prefs.sortField
+            sortAscending = prefs.ascending(for: sortField)
             tvEpisodes = false
             recommendedHubs = []
             browseItems = []
@@ -531,8 +532,20 @@ final class PlexPlayerViewModel: ObservableObject {
     // These are driven by Picker bindings, so defer the reload out of the
     // current view-update cycle to avoid "publishing changes from within view
     // updates" warnings.
-    func setSortField(_ field: PlexSortField) { sortField = field; Task { loadBrowse() } }
-    func setSortAscending(_ ascending: Bool) { sortAscending = ascending; Task { loadBrowse() } }
+    func setSortField(_ field: PlexSortField) {
+        sortField = field
+        // Switching field recalls that field's remembered (or default) direction.
+        sortAscending = prefs.ascending(for: field)
+        prefs.setSortField(field)
+        Task { loadBrowse() }
+    }
+
+    func setSortAscending(_ ascending: Bool) {
+        sortAscending = ascending
+        prefs.setAscending(ascending, for: sortField)
+        Task { loadBrowse() }
+    }
+
     func setTVEpisodes(_ episodes: Bool) { tvEpisodes = episodes; Task { loadBrowse() } }
 
     // MARK: Drill-down
