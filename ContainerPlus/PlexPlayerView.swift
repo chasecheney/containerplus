@@ -362,8 +362,18 @@ final class PlexPlayerViewModel: ObservableObject {
         guard let ref = currentLibrary, let base = baseURL, let token = serverToken else { return }
         let type: Int? = ref.type == "show" ? (tvEpisodes ? 4 : 2) : nil
         let sort = sortField.key + (sortAscending ? ":asc" : ":desc")
-        libraryLoadState = .connecting
-        browseItems = []
+        let cacheKey = "\(ref.id)|type=\(type ?? -1)|sort=\(sort)"
+
+        // Show cached items immediately (if any) while we refresh in the
+        // background; otherwise show the connecting indicator.
+        if let cached = PlexBrowseCache.shared.load(cacheKey), !cached.isEmpty {
+            browseItems = cached
+            libraryLoadState = .ready
+        } else {
+            browseItems = []
+            libraryLoadState = .connecting
+        }
+
         Task {
             do {
                 let items = try await api.sectionItems(
@@ -377,8 +387,11 @@ final class PlexPlayerViewModel: ObservableObject {
                 )
                 browseItems = items
                 libraryLoadState = .ready
+                PlexBrowseCache.shared.save(cacheKey, items: items)
             } catch {
-                libraryLoadState = .failed(classify(error))
+                // Keep showing cached results if we have them; only surface the
+                // error when there's nothing to display.
+                if browseItems.isEmpty { libraryLoadState = .failed(classify(error)) }
             }
         }
     }
@@ -953,9 +966,7 @@ private struct PosterCard: View {
             VStack(alignment: .leading, spacing: 6) {
                 ZStack {
                     RoundedRectangle(cornerRadius: 8).fill(Palette.selectedControl)
-                    AsyncImage(url: model.imageURL(for: item.posterPath)) { image in
-                        image.resizable().aspectRatio(contentMode: .fill)
-                    } placeholder: {
+                    CachedAsyncImage(url: model.imageURL(for: item.posterPath)) {
                         Image(systemName: placeholderSymbol).font(.largeTitle).foregroundStyle(.secondary)
                     }
                     if item.isPlayable {

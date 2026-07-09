@@ -83,7 +83,7 @@ struct PlexDirectory: Decodable, Identifiable {
 }
 
 /// A media item: movie, show, season, or episode.
-struct PlexMetadata: Decodable, Identifiable {
+struct PlexMetadata: Codable, Identifiable {
     let ratingKey: String
     let key: String
     let type: String
@@ -160,7 +160,7 @@ extension PlexMetadata {
     }
 }
 
-struct PlexMedia: Decodable {
+struct PlexMedia: Codable {
     let parts: [PlexPart]?
     let videoResolution: String?
     let bitrate: Int?
@@ -180,7 +180,7 @@ struct PlexMedia: Decodable {
     }
 }
 
-struct PlexPart: Decodable {
+struct PlexPart: Codable {
     let key: String?
     let container: String?
     let file: String?
