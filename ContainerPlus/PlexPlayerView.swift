@@ -1555,36 +1555,29 @@ private struct QueueView: View {
     @ObservedObject var model: PlexPlayerViewModel
     @Environment(\.dismiss) private var dismiss
 
+    /// How many items to show on each side of the current one.
+    private let window = 30
+
     var body: some View {
         NavigationStack {
             List {
                 if model.playQueue.isEmpty {
                     Text("The queue is empty.").foregroundStyle(.secondary)
-                }
-                ForEach(Array(model.playQueue.enumerated()), id: \.offset) { index, item in
-                    HStack(spacing: 10) {
-                        Image(systemName: index == model.queueIndex ? "play.fill" : "line.3.horizontal")
-                            .foregroundStyle(index == model.queueIndex ? Color.accentColor : .secondary)
-                            .frame(width: 18)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(item.title).lineLimit(1)
-                            if let subtitle = item.subtitle {
-                                Text(subtitle).font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                            }
-                        }
-                        Spacer()
-                        if index == model.queueIndex {
-                            Text("Now Playing").font(.caption2).foregroundStyle(.secondary)
-                        }
+                } else {
+                    let lower = max(0, model.queueIndex - window)
+                    let upper = min(model.playQueue.count - 1, model.queueIndex + window)
+
+                    if lower > 0 {
+                        Text("\(lower) earlier item\(lower == 1 ? "" : "s") hidden")
+                            .font(.caption).foregroundStyle(.secondary)
                     }
-                    .contentShape(Rectangle())
-                    .onTapGesture { model.playQueueItem(at: index) }
-                    .swipeActions {
-                        if index != model.queueIndex {
-                            Button(role: .destructive) { model.removeFromQueue(at: index) } label: {
-                                Label("Remove", systemImage: "trash")
-                            }
-                        }
+                    ForEach(lower...upper, id: \.self) { index in
+                        row(index)
+                    }
+                    let remaining = (model.playQueue.count - 1) - upper
+                    if remaining > 0 {
+                        Text("\(remaining) more item\(remaining == 1 ? "" : "s") hidden")
+                            .font(.caption).foregroundStyle(.secondary)
                     }
                 }
             }
@@ -1592,6 +1585,35 @@ private struct QueueView: View {
             .toolbar { ToolbarItem { Button("Done") { dismiss() } } }
         }
         .frame(minWidth: 420, minHeight: 480)
+    }
+
+    private func row(_ index: Int) -> some View {
+        let item = model.playQueue[index]
+        let isCurrent = index == model.queueIndex
+        return HStack(spacing: 10) {
+            Image(systemName: isCurrent ? "play.fill" : "line.3.horizontal")
+                .foregroundStyle(isCurrent ? Color.accentColor : .secondary)
+                .frame(width: 18)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(item.title).lineLimit(1)
+                if let subtitle = item.subtitle {
+                    Text(subtitle).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                }
+            }
+            Spacer()
+            if isCurrent {
+                Text("Now Playing").font(.caption2).foregroundStyle(.secondary)
+            }
+        }
+        .contentShape(Rectangle())
+        .onTapGesture { model.playQueueItem(at: index) }
+        .swipeActions {
+            if !isCurrent {
+                Button(role: .destructive) { model.removeFromQueue(at: index) } label: {
+                    Label("Remove", systemImage: "trash")
+                }
+            }
+        }
     }
 }
 
