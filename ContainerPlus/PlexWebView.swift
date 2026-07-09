@@ -50,7 +50,19 @@ final class PlexViewModel: NSObject, ObservableObject, WKNavigationDelegate, WKU
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         isLoading = false
-        if let url = webView.url { KeychainHelper.set(url.absoluteString, for: Self.keychainAccount) }
+        if let url = webView.url { scheduleSaveLastURL(url.absoluteString) }
+    }
+
+    /// Debounced, off-main keychain write so we don't do synchronous keychain
+    /// I/O on the main thread on every single navigation.
+    private var saveTask: Task<Void, Never>?
+    private func scheduleSaveLastURL(_ urlString: String) {
+        saveTask?.cancel()
+        saveTask = Task.detached {
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            if Task.isCancelled { return }
+            KeychainHelper.set(urlString, for: Self.keychainAccount)
+        }
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {

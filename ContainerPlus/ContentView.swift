@@ -1,9 +1,20 @@
 import SwiftUI
 
 struct ContentView: View {
-    // Default panes: native Plex (API) on the left, Web Browser on the right.
-    @StateObject private var left = PaneModel(selection: .plexPlayer)
-    @StateObject private var right = PaneModel(selection: .webBrowser)
+    private static let leftKey = "containerplus.leftContainer"
+    private static let rightKey = "containerplus.rightContainer"
+
+    @StateObject private var left: PaneModel
+    @StateObject private var right: PaneModel
+
+    init() {
+        // Restore each pane's last-selected container (defaults: Plex API + Web).
+        let defaults = UserDefaults.standard
+        let l = ContainerType(rawValue: defaults.string(forKey: Self.leftKey) ?? "") ?? .plexPlayer
+        let r = ContainerType(rawValue: defaults.string(forKey: Self.rightKey) ?? "") ?? .webBrowser
+        _left = StateObject(wrappedValue: PaneModel(selection: l))
+        _right = StateObject(wrappedValue: PaneModel(selection: r))
+    }
 
     var body: some View {
         SplitContainerView {
@@ -12,6 +23,12 @@ struct ContentView: View {
             ContainerHostView(pane: right)
         }
         .background(Palette.windowBackground)
+        .onChange(of: left.selection) { _, value in
+            UserDefaults.standard.set(value.rawValue, forKey: Self.leftKey)
+        }
+        .onChange(of: right.selection) { _, value in
+            UserDefaults.standard.set(value.rawValue, forKey: Self.rightKey)
+        }
     }
 }
 

@@ -220,6 +220,8 @@ final class PlexPlayerViewModel: ObservableObject {
         pollTask?.cancel()
         authToken = nil
         KeychainHelper.delete("plex.lastConnection")
+        ImageCache.shared.clear()
+        PlexBrowseCache.shared.clear()
         baseURL = nil
         serverToken = nil
         connectionCache = [:]

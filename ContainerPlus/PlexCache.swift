@@ -39,8 +39,19 @@ final class ImageCache {
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         memory.countLimit = 600
         let config = URLSessionConfiguration.default
-        config.requestCachePolicy = .returnCacheDataElseLoad
+        // Don't let the shared URLCache persist poster URLs (they embed the
+        // Plex token); we manage our own token-free disk cache below.
+        config.urlCache = nil
+        config.requestCachePolicy = .reloadIgnoringLocalCacheData
         session = URLSession(configuration: config)
+    }
+
+    /// Clears the in-memory and on-disk thumbnail caches (e.g. on sign-out).
+    func clear() {
+        memory.removeAllObjects()
+        if let files = try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) {
+            for file in files { try? FileManager.default.removeItem(at: file) }
+        }
     }
 
     func image(for url: URL) async -> PlatformImage? {
@@ -120,5 +131,12 @@ final class PlexBrowseCache {
         guard let data = try? JSONEncoder().encode(items) else { return }
         let url = file(for: key)
         Task.detached(priority: .utility) { try? data.write(to: url, options: .atomic) }
+    }
+
+    /// Removes all cached browse JSON (e.g. on sign-out).
+    func clear() {
+        if let files = try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) {
+            for file in files { try? FileManager.default.removeItem(at: file) }
+        }
     }
 }

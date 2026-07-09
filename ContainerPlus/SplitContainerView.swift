@@ -21,8 +21,9 @@ struct SplitContainerView<Left: View, Right: View>: View {
         self.right = right()
     }
 
-    /// Committed fraction of the total width given to the left pane.
-    @State private var fraction: CGFloat = 0.5
+    /// Committed fraction of the left pane, persisted across launches.
+    @AppStorage("containerplus.splitFraction") private var storedFraction: Double = 0.5
+    private var fraction: CGFloat { CGFloat(storedFraction) }
     /// Live fraction of the guide while dragging (nil when not dragging).
     @State private var dragFraction: CGFloat?
     @State private var dragStartFraction: CGFloat?
@@ -112,7 +113,7 @@ struct SplitContainerView<Left: View, Right: View>: View {
                     dragFraction = snapped(clamp(start + value.translation.width / total))
                 }
                 .onEnded { _ in
-                    if let dragFraction { fraction = dragFraction }
+                    if let dragFraction { storedFraction = Double(dragFraction) }
                     dragFraction = nil
                     dragStartFraction = nil
                 }
