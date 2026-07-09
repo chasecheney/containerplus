@@ -2,6 +2,12 @@ import SwiftUI
 import AVKit
 import AVFoundation
 
+/// An audio or subtitle track option. `id == -1` means "Off" (subtitles).
+struct MediaTrack: Identifiable, Equatable {
+    let id: Int
+    let name: String
+}
+
 /// Live network diagnostics for a single request, shown in the debug overlay.
 struct NetStat: Equatable {
     var label: String = ""
@@ -110,8 +116,17 @@ final class PlexPlayerViewModel: ObservableObject {
     @Published private(set) var volume: Double = 1.0
     @Published private(set) var isMuted = false
 
+    // Tracks (audio / subtitles) for the currently playing item
+    @Published private(set) var audioTracks: [MediaTrack] = []
+    @Published private(set) var subtitleTracks: [MediaTrack] = []
+    @Published private(set) var currentAudioID: Int?
+    @Published private(set) var currentSubtitleID: Int = -1   // -1 = Off
+    private var audioGroup: AVMediaSelectionGroup?
+    private var subtitleGroup: AVMediaSelectionGroup?
+
     // Sheets
     @Published var showLibraryPicker = false
+    @Published var showQueue = false
     @Published var infoItem: PlexMetadata?
 
     let api = PlexAPI()
@@ -124,8 +139,8 @@ final class PlexPlayerViewModel: ObservableObject {
     private var endObserver: NSObjectProtocol?
 
     // Play queue
-    private var playQueue: [PlexMetadata] = []
-    private var queueIndex = 0
+    @Published private(set) var playQueue: [PlexMetadata] = []
+    @Published private(set) var queueIndex = 0
 
     nonisolated init() {}
 
@@ -626,6 +641,76 @@ final class PlexPlayerViewModel: ObservableObject {
             isPlayerMinimized = false
         }
         player.play()
+        if let currentItem = player.currentItem {
+            Task { await loadTracks(for: currentItem) }
+        }
+    }
+
+    // MARK: Audio / subtitle tracks
+
+    private func loadTracks(for item: AVPlayerItem) async {
+        audioTracks = []
+        subtitleTracks = [MediaTrack(id: -1, name: "Off")]
+        currentAudioID = nil
+        currentSubtitleID = -1
+        audioGroup = nil
+        subtitleGroup = nil
+
+        let asset = item.asset
+        if let group = try? await asset.loadMediaSelectionGroup(for: .audible) {
+            audioGroup = group
+            audioTracks = group.options.enumerated().map { MediaTrack(id: $0.offset, name: $0.element.displayName) }
+            if let selected = item.currentMediaSelection.selectedMediaOption(in: group),
+               let index = group.options.firstIndex(of: selected) {
+                currentAudioID = index
+            } else {
+                currentAudioID = audioTracks.first?.id
+            }
+        }
+        if let group = try? await asset.loadMediaSelectionGroup(for: .legible) {
+            subtitleGroup = group
+            subtitleTracks = [MediaTrack(id: -1, name: "Off")]
+                + group.options.enumerated().map { MediaTrack(id: $0.offset, name: $0.element.displayName) }
+            if let selected = item.currentMediaSelection.selectedMediaOption(in: group),
+               let index = group.options.firstIndex(of: selected) {
+                currentSubtitleID = index
+            } else {
+                currentSubtitleID = -1
+            }
+        }
+    }
+
+    func selectAudio(_ id: Int) {
+        guard let group = audioGroup, group.options.indices.contains(id),
+              let item = player?.currentItem else { return }
+        item.select(group.options[id], in: group)
+        currentAudioID = id
+    }
+
+    func selectSubtitle(_ id: Int) {
+        guard let group = subtitleGroup, let item = player?.currentItem else { return }
+        if id < 0 {
+            item.select(nil, in: group)
+            currentSubtitleID = -1
+        } else if group.options.indices.contains(id) {
+            item.select(group.options[id], in: group)
+            currentSubtitleID = id
+        }
+    }
+
+    // MARK: Queue management
+
+    func playQueueItem(at index: Int) {
+        guard playQueue.indices.contains(index) else { return }
+        queueIndex = index
+        let item = playQueue[index]
+        Task { await startPlayback(item, resumeAt: nil) }
+    }
+
+    func removeFromQueue(at index: Int) {
+        guard playQueue.indices.contains(index), index != queueIndex else { return }
+        playQueue.remove(at: index)
+        if index < queueIndex { queueIndex -= 1 }
     }
 
     private func observePlayback(_ player: AVPlayer) {
@@ -683,6 +768,12 @@ final class PlexPlayerViewModel: ObservableObject {
         isPlaying = false
         playQueue = []
         queueIndex = 0
+        audioTracks = []
+        subtitleTracks = []
+        currentAudioID = nil
+        currentSubtitleID = -1
+        audioGroup = nil
+        subtitleGroup = nil
     }
 
     func setQuality(_ newQuality: PlexQuality) {
@@ -734,6 +825,7 @@ struct PlexPlayerContainerView: View {
         }
         .overlay { fullPlayer }
         .sheet(isPresented: $model.showLibraryPicker) { LibraryPickerView(model: model) }
+        .sheet(isPresented: $model.showQueue) { QueueView(model: model) }
         .sheet(item: $model.infoItem) { item in MediaInfoView(item: item) }
         .onAppear { model.start() }
     }
@@ -1404,6 +1496,30 @@ private struct FullPlayerView: View {
 
             Button { model.presentInfo() } label: { Image(systemName: "info.circle").font(.title3) }
                 .help("Media info")
+
+            // Audio / subtitle tracks.
+            Menu {
+                if model.audioTracks.count > 1 {
+                    Picker("Audio", selection: Binding(get: { model.currentAudioID ?? -1 },
+                                                       set: { model.selectAudio($0) })) {
+                        ForEach(model.audioTracks) { track in Text(track.name).tag(track.id) }
+                    }
+                    .pickerStyle(.inline)
+                }
+                Picker("Subtitles", selection: Binding(get: { model.currentSubtitleID },
+                                                       set: { model.selectSubtitle($0) })) {
+                    ForEach(model.subtitleTracks) { track in Text(track.name).tag(track.id) }
+                }
+                .pickerStyle(.inline)
+                if model.audioTracks.count <= 1 && model.subtitleTracks.count <= 1 {
+                    Text("No alternate tracks")
+                }
+            } label: {
+                Image(systemName: "gearshape").font(.title3)
+            }
+            .menuIndicator(.hidden)
+            .help("Audio & subtitles")
+
             Menu {
                 Picker("Quality", selection: Binding(get: { model.quality }, set: { model.setQuality($0) })) {
                     ForEach(PlexQuality.allCases) { q in Text(q.rawValue).tag(q) }
@@ -1413,6 +1529,13 @@ private struct FullPlayerView: View {
             }
             .menuIndicator(.hidden)
             .help("Playback quality")
+
+            // Play queue.
+            Button { model.showQueue = true } label: {
+                Image(systemName: "line.3.horizontal").font(.title3)
+            }
+            .help("Queue")
+
             Button { model.closePlayer() } label: { Image(systemName: "xmark").font(.title3) }
                 .help("Stop")
         }
@@ -1423,6 +1546,52 @@ private struct FullPlayerView: View {
             LinearGradient(colors: [.black.opacity(0.65), .clear], startPoint: .top, endPoint: .bottom)
                 .ignoresSafeArea(edges: .top)
         )
+    }
+}
+
+// MARK: - Queue sheet
+
+private struct QueueView: View {
+    @ObservedObject var model: PlexPlayerViewModel
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            List {
+                if model.playQueue.isEmpty {
+                    Text("The queue is empty.").foregroundStyle(.secondary)
+                }
+                ForEach(Array(model.playQueue.enumerated()), id: \.offset) { index, item in
+                    HStack(spacing: 10) {
+                        Image(systemName: index == model.queueIndex ? "play.fill" : "line.3.horizontal")
+                            .foregroundStyle(index == model.queueIndex ? Color.accentColor : .secondary)
+                            .frame(width: 18)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(item.title).lineLimit(1)
+                            if let subtitle = item.subtitle {
+                                Text(subtitle).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                            }
+                        }
+                        Spacer()
+                        if index == model.queueIndex {
+                            Text("Now Playing").font(.caption2).foregroundStyle(.secondary)
+                        }
+                    }
+                    .contentShape(Rectangle())
+                    .onTapGesture { model.playQueueItem(at: index) }
+                    .swipeActions {
+                        if index != model.queueIndex {
+                            Button(role: .destructive) { model.removeFromQueue(at: index) } label: {
+                                Label("Remove", systemImage: "trash")
+                            }
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Up Next")
+            .toolbar { ToolbarItem { Button("Done") { dismiss() } } }
+        }
+        .frame(minWidth: 420, minHeight: 480)
     }
 }
 

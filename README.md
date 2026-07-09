@@ -58,6 +58,10 @@ A **native** Plex client (no web view) built on the Plex API and `AVPlayer`:
   while the video keeps playing; tap the bar to expand again.
 - **Playback quality**: switch between Original and 1080p/720p/480p transcodes
   (resumes at the current position).
+- **Audio & subtitles**: the gear button lists the stream's audio tracks and
+  subtitle tracks (including Off), read from the player's media selection groups.
+- **Queue**: long-press a poster for "Play Next" / "Add to Queue"; the hamburger
+  button shows the up-next list (tap to jump, swipe to remove).
 - **Media info**: the ℹ️ button shows resolution, codecs, bitrate, container,
   size, and the file's name/path.
 - **Play** in an `AVPlayer`, resuming from the last watched offset. Direct play
