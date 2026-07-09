@@ -117,6 +117,8 @@ final class PlexPlayerViewModel: ObservableObject {
     @Published private(set) var nowPlayingItem: PlexMetadata?
     @Published var isPlayerMinimized = false
     @Published private(set) var isPlaying = false
+    @Published private(set) var currentTime: Double = 0
+    @Published private(set) var duration: Double = 0
     @Published private(set) var quality: PlexQuality = PlexPreferences.shared.preferredQuality
     /// App-level playback volume (0…1), independent of the device volume.
     @Published private(set) var volume: Double = 1.0
@@ -145,6 +147,7 @@ final class PlexPlayerViewModel: ObservableObject {
     private var pollTask: Task<Void, Never>?
     private var statusObservation: NSKeyValueObservation?
     private var endObserver: NSObjectProtocol?
+    private var timeObserver: Any?
 
     // Play queue
     @Published private(set) var playQueue: [PlexMetadata] = []
@@ -689,11 +692,16 @@ final class PlexPlayerViewModel: ObservableObject {
         if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
         endObserver = nil
         if let existing = self.player {
+            if let timeObserver { existing.removeTimeObserver(timeObserver) }
+            timeObserver = nil
             existing.pause()
             existing.replaceCurrentItem(with: nil)
         }
+        currentTime = 0
+        duration = 0
 
         let player = AVPlayer(url: url)
+        observeTime(player)
         if let resumeAt {
             player.seek(to: resumeAt) { _ in }
         } else if let offsetMs = item.viewOffset, offsetMs > 0 {
@@ -805,6 +813,34 @@ final class PlexPlayerViewModel: ObservableObject {
         }
     }
 
+    private func observeTime(_ player: AVPlayer) {
+        let interval = CMTime(seconds: 0.5, preferredTimescale: 600)
+        timeObserver = player.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] time in
+            guard let self else { return }
+            let seconds = time.seconds
+            if seconds.isFinite { self.currentTime = seconds }
+            if let itemDuration = player.currentItem?.duration.seconds,
+               itemDuration.isFinite, itemDuration > 0 {
+                self.duration = itemDuration
+            }
+        }
+    }
+
+    /// Seek to a fraction (0…1) of the item's duration.
+    func seek(toFraction fraction: Double) {
+        guard let player, duration > 0 else { return }
+        let target = max(0, min(1, fraction)) * duration
+        currentTime = target
+        player.seek(to: CMTime(seconds: target, preferredTimescale: 600))
+    }
+
+    func skip(by seconds: Double) {
+        guard let player, duration > 0 else { return }
+        let target = max(0, min(duration, currentTime + seconds))
+        currentTime = target
+        player.seek(to: CMTime(seconds: target, preferredTimescale: 600))
+    }
+
     private func observeEnd(of player: AVPlayer) {
         if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
         endObserver = NotificationCenter.default.addObserver(
@@ -842,6 +878,10 @@ final class PlexPlayerViewModel: ObservableObject {
         statusObservation = nil
         if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
         endObserver = nil
+        if let timeObserver { player?.removeTimeObserver(timeObserver) }
+        timeObserver = nil
+        currentTime = 0
+        duration = 0
         player?.pause()
         withAnimation(.easeInOut(duration: 0.25)) {
             player = nil
@@ -1598,7 +1638,7 @@ private struct MiniPlayerBar: View {
     var body: some View {
         HStack(spacing: 12) {
             if let player = model.player {
-                VideoPlayer(player: player)
+                PlayerLayerView(player: player)
                     .frame(width: 120, height: 68)
                     .clipShape(RoundedRectangle(cornerRadius: 6))
                     .allowsHitTesting(false)
@@ -1638,13 +1678,17 @@ private struct FullPlayerView: View {
     @GestureState private var pinch: CGFloat = 1.0
     private let maxZoom: CGFloat = 4.0
 
+    // Scrubber state.
+    @State private var scrubbing = false
+    @State private var scrubValue: Double = 0
+
     private var effectiveScale: CGFloat { min(max(zoom * pinch, 1.0), maxZoom) }
 
     var body: some View {
-        ZStack(alignment: .top) {
+        ZStack {
             Color.black.ignoresSafeArea()
             if let player = model.player {
-                VideoPlayer(player: player)
+                PlayerLayerView(player: player)
                     .scaleEffect(effectiveScale)
                     .ignoresSafeArea()
                     .gesture(
@@ -1655,44 +1699,30 @@ private struct FullPlayerView: View {
                                 if zoom < 1.05 { zoom = 1.0 }
                             }
                     )
-                    // Double-tap to snap back to standard.
                     .simultaneousGesture(
                         TapGesture(count: 2).onEnded {
                             withAnimation(.easeOut(duration: 0.2)) { zoom = 1.0 }
                         }
                     )
             }
-            controlBar
+            VStack(spacing: 0) {
+                controlBar
+                Spacer(minLength: 0)
+                transportBar
+            }
         }
         .clipped()
         .animation(.easeOut(duration: 0.15), value: zoom)
     }
 
+    // Top bar: navigation + settings-style controls.
     private var controlBar: some View {
         HStack(spacing: 16) {
             Button { model.minimizePlayer() } label: { Image(systemName: "chevron.down").font(.title3) }
                 .help("Minimize")
 
-            // Queue navigation.
-            Button { model.playPreviousInQueue() } label: { Image(systemName: "backward.end.fill").font(.title3) }
-                .disabled(!model.hasPreviousInQueue)
-                .help("Previous in queue")
-            Button { model.playNextInQueue() } label: { Image(systemName: "forward.end.fill").font(.title3) }
-                .disabled(!model.hasNextInQueue)
-                .help("Next in queue")
-
             Text(model.nowPlayingTitle ?? "").font(.headline).lineLimit(1)
             Spacer()
-
-            // In-app volume (independent of the device volume) + mute.
-            Button { model.toggleMute() } label: {
-                Image(systemName: model.isMuted || model.volume == 0 ? "speaker.slash.fill" : "speaker.wave.2.fill")
-                    .font(.title3)
-            }
-            .help(model.isMuted ? "Unmute" : "Mute")
-            Slider(value: Binding(get: { model.volume }, set: { model.setVolume($0) }), in: 0...1)
-                .frame(width: 110)
-                .tint(.white)
 
             Button { model.presentInfo() } label: { Image(systemName: "info.circle").font(.title3) }
                 .help("Media info")
@@ -1730,7 +1760,6 @@ private struct FullPlayerView: View {
             .menuIndicator(.hidden)
             .help("Playback quality")
 
-            // Reset zoom (only shown while zoomed in).
             if zoom > 1.01 {
                 Button { withAnimation(.easeOut(duration: 0.2)) { zoom = 1.0 } } label: {
                     Image(systemName: "arrow.down.right.and.arrow.up.left").font(.title3)
@@ -1738,22 +1767,74 @@ private struct FullPlayerView: View {
                 .help("Reset zoom")
             }
 
-            // Play queue.
-            Button { model.showQueue = true } label: {
-                Image(systemName: "line.3.horizontal").font(.title3)
-            }
-            .help("Queue")
+            Button { model.showQueue = true } label: { Image(systemName: "line.3.horizontal").font(.title3) }
+                .help("Queue")
 
             Button { model.closePlayer() } label: { Image(systemName: "xmark").font(.title3) }
                 .help("Stop")
         }
         .buttonStyle(.plain)
         .foregroundStyle(.white)
-        .padding(.horizontal, 16).padding(.vertical, 12)
+        .padding(.horizontal, 20).padding(.vertical, 12)
         .background(
-            LinearGradient(colors: [.black.opacity(0.65), .clear], startPoint: .top, endPoint: .bottom)
+            LinearGradient(colors: [.black.opacity(0.7), .clear], startPoint: .top, endPoint: .bottom)
                 .ignoresSafeArea(edges: .top)
         )
+    }
+
+    // Bottom bar: our own transport (replaces AVKit's built-in controls).
+    private var transportBar: some View {
+        VStack(spacing: 6) {
+            HStack(spacing: 10) {
+                Text(timeString(model.currentTime)).font(.caption).monospacedDigit()
+                Slider(value: $scrubValue, in: 0...1) { editing in
+                    scrubbing = editing
+                    if !editing { model.seek(toFraction: scrubValue) }
+                }
+                .tint(.white)
+                .disabled(model.duration <= 0)
+                Text(timeString(model.duration)).font(.caption).monospacedDigit()
+            }
+
+            HStack(spacing: 22) {
+                Button { model.playPreviousInQueue() } label: { Image(systemName: "backward.end.fill") }
+                    .disabled(!model.hasPreviousInQueue)
+                Button { model.skip(by: -10) } label: { Image(systemName: "gobackward.10") }
+                Button { model.togglePlayPause() } label: {
+                    Image(systemName: model.isPlaying ? "pause.fill" : "play.fill").font(.title)
+                }
+                Button { model.skip(by: 10) } label: { Image(systemName: "goforward.10") }
+                Button { model.playNextInQueue() } label: { Image(systemName: "forward.end.fill") }
+                    .disabled(!model.hasNextInQueue)
+
+                Spacer()
+
+                Button { model.toggleMute() } label: {
+                    Image(systemName: model.isMuted || model.volume == 0 ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                }
+                Slider(value: Binding(get: { model.volume }, set: { model.setVolume($0) }), in: 0...1)
+                    .frame(width: 110)
+                    .tint(.white)
+            }
+            .font(.title3)
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.white)
+        .padding(.horizontal, 20).padding(.top, 10).padding(.bottom, 14)
+        .background(
+            LinearGradient(colors: [.clear, .black.opacity(0.7)], startPoint: .top, endPoint: .bottom)
+                .ignoresSafeArea(edges: .bottom)
+        )
+        .onChange(of: model.currentTime) { _, _ in
+            if !scrubbing, model.duration > 0 { scrubValue = model.currentTime / model.duration }
+        }
+    }
+
+    private func timeString(_ seconds: Double) -> String {
+        guard seconds.isFinite, seconds >= 0 else { return "0:00" }
+        let total = Int(seconds)
+        let h = total / 3600, m = (total % 3600) / 60, s = total % 60
+        return h > 0 ? String(format: "%d:%02d:%02d", h, m, s) : String(format: "%d:%02d", m, s)
     }
 }
 
