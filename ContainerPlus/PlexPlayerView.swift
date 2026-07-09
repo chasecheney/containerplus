@@ -1136,6 +1136,10 @@ private struct PosterCard: View {
                         .frame(width: width, alignment: .leading)
                 }
             }
+            .frame(width: width)
+            // Make the whole card one hit target — including the poster's
+            // rounded-corner gaps and any transparent areas.
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
     }
