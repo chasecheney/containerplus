@@ -98,7 +98,7 @@ final class PlexPlayerViewModel: ObservableObject {
     @Published private(set) var browseLoadingMore = false
 
     // Network debug overlay
-    @Published var showNetDebug = true
+    @Published var showNetDebug = false
     @Published private(set) var browseNet = NetStat()
     @Published private(set) var recommendedNet = NetStat()
 
