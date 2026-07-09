@@ -327,7 +327,8 @@ final class PlexPlayerViewModel: ObservableObject {
 
     func setLibraryTab(_ tab: LibraryTab) {
         libraryTab = tab
-        loadLibraryTab()
+        // Driven by a Picker binding; defer the load off the view-update cycle.
+        Task { loadLibraryTab() }
     }
 
     func loadLibraryTab() {
@@ -396,9 +397,12 @@ final class PlexPlayerViewModel: ObservableObject {
         }
     }
 
-    func setSortField(_ field: PlexSortField) { sortField = field; loadBrowse() }
-    func setSortAscending(_ ascending: Bool) { sortAscending = ascending; loadBrowse() }
-    func setTVEpisodes(_ episodes: Bool) { tvEpisodes = episodes; loadBrowse() }
+    // These are driven by Picker bindings, so defer the reload out of the
+    // current view-update cycle to avoid "publishing changes from within view
+    // updates" warnings.
+    func setSortField(_ field: PlexSortField) { sortField = field; Task { loadBrowse() } }
+    func setSortAscending(_ ascending: Bool) { sortAscending = ascending; Task { loadBrowse() } }
+    func setTVEpisodes(_ episodes: Bool) { tvEpisodes = episodes; Task { loadBrowse() } }
 
     // MARK: Drill-down
 
@@ -471,9 +475,9 @@ final class PlexPlayerViewModel: ObservableObject {
         guard let url = api.playbackURL(base: base, token: token, item: item, quality: quality) else { return }
         let player = AVPlayer(url: url)
         if let resumeAt {
-            player.seek(to: resumeAt)
+            player.seek(to: resumeAt) { _ in }
         } else if let offsetMs = item.viewOffset, offsetMs > 0 {
-            player.seek(to: CMTime(seconds: Double(offsetMs) / 1000.0, preferredTimescale: 600))
+            player.seek(to: CMTime(seconds: Double(offsetMs) / 1000.0, preferredTimescale: 600)) { _ in }
         }
         player.volume = Float(volume)
         player.isMuted = isMuted
