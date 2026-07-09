@@ -1,6 +1,11 @@
 import SwiftUI
 import AVKit
 import AVFoundation
+#if os(macOS)
+import AppKit
+#else
+import UIKit
+#endif
 
 /// An audio or subtitle track option. `id == -1` means "Off" (subtitles).
 struct MediaTrack: Identifiable, Equatable {
@@ -816,12 +821,14 @@ final class PlexPlayerViewModel: ObservableObject {
     private func observeTime(_ player: AVPlayer) {
         let interval = CMTime(seconds: 0.5, preferredTimescale: 600)
         timeObserver = player.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] time in
-            guard let self else { return }
             let seconds = time.seconds
-            if seconds.isFinite { self.currentTime = seconds }
-            if let itemDuration = player.currentItem?.duration.seconds,
-               itemDuration.isFinite, itemDuration > 0 {
-                self.duration = itemDuration
+            Task { @MainActor in
+                guard let self else { return }
+                if seconds.isFinite { self.currentTime = seconds }
+                if let itemDuration = self.player?.currentItem?.duration.seconds,
+                   itemDuration.isFinite, itemDuration > 0 {
+                    self.duration = itemDuration
+                }
             }
         }
     }
@@ -2035,3 +2042,58 @@ private struct MediaInfoView: View {
         }
     }
 }
+
+// MARK: - Player layer (no system controls)
+
+/// Renders an AVPlayer via a plain `AVPlayerLayer` — no system playback
+/// controls — so AVKit's built-in controls don't collide with our overlay.
+#if os(macOS)
+struct PlayerLayerView: NSViewRepresentable {
+    let player: AVPlayer
+    func makeNSView(context: Context) -> PlayerLayerNSView {
+        let view = PlayerLayerNSView()
+        view.playerLayer.player = player
+        return view
+    }
+    func updateNSView(_ nsView: PlayerLayerNSView, context: Context) {
+        nsView.playerLayer.player = player
+    }
+}
+
+final class PlayerLayerNSView: NSView {
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    override func makeBackingLayer() -> CALayer {
+        let layer = AVPlayerLayer()
+        layer.videoGravity = .resizeAspect
+        return layer
+    }
+    var playerLayer: AVPlayerLayer { layer as! AVPlayerLayer }
+}
+#else
+struct PlayerLayerView: UIViewRepresentable {
+    let player: AVPlayer
+    func makeUIView(context: Context) -> PlayerLayerUIView {
+        let view = PlayerLayerUIView()
+        view.playerLayer.player = player
+        return view
+    }
+    func updateUIView(_ uiView: PlayerLayerUIView, context: Context) {
+        uiView.playerLayer.player = player
+    }
+}
+
+final class PlayerLayerUIView: UIView {
+    override class var layerClass: AnyClass { AVPlayerLayer.self }
+    var playerLayer: AVPlayerLayer { layer as! AVPlayerLayer }
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        playerLayer.videoGravity = .resizeAspect
+        backgroundColor = .black
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+}
+#endif
