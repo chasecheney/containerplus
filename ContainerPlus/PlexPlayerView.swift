@@ -154,6 +154,11 @@ final class PlexPlayerViewModel: ObservableObject {
     private var endObserver: NSObjectProtocol?
     private var timeObserver: Any?
 
+    // Live scrubbing (chase-time coalescing so drags don't flood seeks).
+    private var isSeekInProgress = false
+    private var chaseTime: CMTime = .zero
+    private var wasPlayingBeforeScrub = false
+
     // Play queue
     @Published private(set) var playQueue: [PlexMetadata] = []
     @Published private(set) var queueIndex = 0
@@ -839,6 +844,43 @@ final class PlexPlayerViewModel: ObservableObject {
         let target = max(0, min(1, fraction)) * duration
         currentTime = target
         player.seek(to: CMTime(seconds: target, preferredTimescale: 600))
+    }
+
+    // MARK: Live scrubbing
+
+    func beginScrub() {
+        wasPlayingBeforeScrub = player?.timeControlStatus == .playing
+        player?.pause()
+    }
+
+    /// Called continuously as the scrubber is dragged — seeks the video live.
+    func scrub(toFraction fraction: Double) {
+        guard duration > 0 else { return }
+        let target = max(0, min(1, fraction)) * duration
+        currentTime = target
+        chaseTime = CMTime(seconds: target, preferredTimescale: 600)
+        if !isSeekInProgress { seekToChaseTime() }
+    }
+
+    func endScrub(toFraction fraction: Double) {
+        scrub(toFraction: fraction)
+        if wasPlayingBeforeScrub { player?.play() }
+    }
+
+    private func seekToChaseTime() {
+        guard let player else { isSeekInProgress = false; return }
+        isSeekInProgress = true
+        let target = chaseTime
+        player.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                if CMTimeCompare(self.chaseTime, target) == 0 {
+                    self.isSeekInProgress = false
+                } else {
+                    self.seekToChaseTime()
+                }
+            }
+        }
     }
 
     func skip(by seconds: Double) {
@@ -1793,13 +1835,18 @@ private struct FullPlayerView: View {
     private var transportBar: some View {
         VStack(spacing: 6) {
             HStack(spacing: 10) {
-                Text(timeString(model.currentTime)).font(.caption).monospacedDigit()
+                Text(timeString(scrubbing ? scrubValue * model.duration : model.currentTime))
+                    .font(.caption).monospacedDigit()
                 Slider(value: $scrubValue, in: 0...1) { editing in
                     scrubbing = editing
-                    if !editing { model.seek(toFraction: scrubValue) }
+                    if editing { model.beginScrub() }
+                    else { model.endScrub(toFraction: scrubValue) }
                 }
                 .tint(.white)
                 .disabled(model.duration <= 0)
+                .onChange(of: scrubValue) { _, newValue in
+                    if scrubbing { model.scrub(toFraction: newValue) }
+                }
                 Text(timeString(model.duration)).font(.caption).monospacedDigit()
             }
 
