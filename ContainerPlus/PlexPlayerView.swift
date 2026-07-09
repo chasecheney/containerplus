@@ -713,6 +713,19 @@ final class PlexPlayerViewModel: ObservableObject {
 
     // MARK: Queue management
 
+    var hasPreviousInQueue: Bool { queueIndex > 0 }
+    var hasNextInQueue: Bool { queueIndex < playQueue.count - 1 }
+
+    func playPreviousInQueue() {
+        guard hasPreviousInQueue else { return }
+        playQueueItem(at: queueIndex - 1)
+    }
+
+    func playNextInQueue() {
+        guard hasNextInQueue else { return }
+        playQueueItem(at: queueIndex + 1)
+    }
+
     func playQueueItem(at index: Int) {
         guard playQueue.indices.contains(index) else { return }
         queueIndex = index
@@ -1494,6 +1507,15 @@ private struct FullPlayerView: View {
         HStack(spacing: 16) {
             Button { model.minimizePlayer() } label: { Image(systemName: "chevron.down").font(.title3) }
                 .help("Minimize")
+
+            // Queue navigation.
+            Button { model.playPreviousInQueue() } label: { Image(systemName: "backward.end.fill").font(.title3) }
+                .disabled(!model.hasPreviousInQueue)
+                .help("Previous in queue")
+            Button { model.playNextInQueue() } label: { Image(systemName: "forward.end.fill").font(.title3) }
+                .disabled(!model.hasNextInQueue)
+                .help("Next in queue")
+
             Text(model.nowPlayingTitle ?? "").font(.headline).lineLimit(1)
             Spacer()
 
