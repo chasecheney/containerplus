@@ -2,6 +2,32 @@ import SwiftUI
 import AVKit
 import AVFoundation
 
+/// Live network diagnostics for a single request, shown in the debug overlay.
+struct NetStat: Equatable {
+    var label: String = ""
+    var path: String = ""
+    var phase: String = "idle"          // idle / connecting / downloading / done / failed
+    var httpStatus: Int?
+    var bytes: Int = 0
+    var responseSeconds: Double?
+    var finishedSeconds: Double?
+    var error: String?
+
+    var statusLine: String {
+        var s = phase
+        if let httpStatus { s += " · HTTP \(httpStatus)" }
+        if let responseSeconds { s += String(format: " · resp %.2fs", responseSeconds) }
+        if let finishedSeconds { s += String(format: " · done %.2fs", finishedSeconds) }
+        return s
+    }
+
+    var detailLine: String {
+        var parts = [ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)]
+        if let error { parts.append("⚠︎ " + error) }
+        return parts.joined(separator: " · ")
+    }
+}
+
 // MARK: - View model
 
 @MainActor
@@ -62,6 +88,16 @@ final class PlexPlayerViewModel: ObservableObject {
     @Published private(set) var playlists: [PlexMetadata] = []
     @Published private(set) var libraryLoadState: LoadState = .idle
     @Published private(set) var tabLoading = false
+    @Published private(set) var browseHasMore = false
+    @Published private(set) var browseLoadingMore = false
+
+    // Network debug overlay
+    @Published var showNetDebug = true
+    @Published private(set) var browseNet = NetStat()
+    @Published private(set) var recommendedNet = NetStat()
+
+    private let browsePageSize = 300
+    private var browseKey = ""
 
     // Player
     @Published var player: AVPlayer?
@@ -343,9 +379,32 @@ final class PlexPlayerViewModel: ObservableObject {
         guard let ref = currentLibrary, let base = baseURL, let token = serverToken else { return }
         tabLoading = true
         recommendedHubs = []
+        let start = Date()
+        recommendedNet = NetStat(label: "Recommended", path: "/hubs/sections/\(ref.sectionKey)",
+                                 phase: "connecting")
         Task {
-            let hubs = (try? await api.hubs(base: base, token: token, sectionKey: ref.sectionKey)) ?? []
-            recommendedHubs = hubs.filter { ($0.metadata?.isEmpty == false) }
+            do {
+                let hubs = try await api.hubs(
+                    base: base, token: token, sectionKey: ref.sectionKey,
+                    onResponse: { [weak self] status in
+                        Task { @MainActor in
+                            self?.recommendedNet.httpStatus = status
+                            self?.recommendedNet.responseSeconds = Date().timeIntervalSince(start)
+                            self?.recommendedNet.phase = "downloading"
+                        }
+                    },
+                    onProgress: { [weak self] bytes in
+                        Task { @MainActor in self?.recommendedNet.bytes = bytes }
+                    }
+                )
+                recommendedHubs = hubs.filter { ($0.metadata?.isEmpty == false) }
+                recommendedNet.phase = "done"
+                recommendedNet.finishedSeconds = Date().timeIntervalSince(start)
+            } catch {
+                recommendedNet.phase = "failed"
+                recommendedNet.error = classify(error)
+                recommendedNet.finishedSeconds = Date().timeIntervalSince(start)
+            }
             tabLoading = false
         }
     }
@@ -364,6 +423,8 @@ final class PlexPlayerViewModel: ObservableObject {
         let type: Int? = ref.type == "show" ? (tvEpisodes ? 4 : 2) : nil
         let sort = sortField.key + (sortAscending ? ":asc" : ":desc")
         let cacheKey = "\(ref.id)|type=\(type ?? -1)|sort=\(sort)"
+        browseKey = cacheKey
+        browseHasMore = false
 
         // Show cached items immediately (if any) while we refresh in the
         // background; otherwise show the connecting indicator.
@@ -375,24 +436,79 @@ final class PlexPlayerViewModel: ObservableObject {
             libraryLoadState = .connecting
         }
 
+        let start = Date()
+        browseNet = NetStat(label: "Browse",
+                            path: "/library/sections/\(ref.sectionKey)/all (page 0, size \(browsePageSize))",
+                            phase: "connecting")
+
         Task {
             do {
                 let items = try await api.sectionItems(
                     base: base, token: token, sectionKey: ref.sectionKey,
-                    type: type, sort: sort,
-                    onResponse: { [weak self] in
+                    type: type, sort: sort, start: 0, size: browsePageSize,
+                    onResponse: { [weak self] status in
                         Task { @MainActor in
-                            if self?.libraryLoadState == .connecting { self?.libraryLoadState = .downloading }
+                            guard let self else { return }
+                            self.browseNet.httpStatus = status
+                            self.browseNet.responseSeconds = Date().timeIntervalSince(start)
+                            self.browseNet.phase = "downloading"
+                            if self.libraryLoadState == .connecting { self.libraryLoadState = .downloading }
                         }
+                    },
+                    onProgress: { [weak self] bytes in
+                        Task { @MainActor in self?.browseNet.bytes = bytes }
                     }
                 )
+                guard browseKey == cacheKey else { return } // a newer request superseded us
                 browseItems = items
+                browseHasMore = items.count >= browsePageSize
                 libraryLoadState = .ready
+                browseNet.phase = "done"
+                browseNet.finishedSeconds = Date().timeIntervalSince(start)
                 PlexBrowseCache.shared.save(cacheKey, items: items)
             } catch {
+                browseNet.phase = "failed"
+                browseNet.error = classify(error)
+                browseNet.finishedSeconds = Date().timeIntervalSince(start)
                 // Keep showing cached results if we have them; only surface the
                 // error when there's nothing to display.
                 if browseItems.isEmpty { libraryLoadState = .failed(classify(error)) }
+            }
+        }
+    }
+
+    /// Loads the next page when the user scrolls near the end of Browse.
+    func loadMoreBrowseIfNeeded(currentItem item: PlexMetadata) {
+        guard browseHasMore, !browseLoadingMore,
+              let index = browseItems.firstIndex(where: { $0.id == item.id }),
+              index >= browseItems.count - 24,
+              let ref = currentLibrary, let base = baseURL, let token = serverToken else { return }
+
+        let type: Int? = ref.type == "show" ? (tvEpisodes ? 4 : 2) : nil
+        let sort = sortField.key + (sortAscending ? ":asc" : ":desc")
+        let key = browseKey
+        let startIndex = browseItems.count
+        browseLoadingMore = true
+        let start = Date()
+        browseNet.path = "/library/sections/\(ref.sectionKey)/all (page @\(startIndex))"
+        browseNet.phase = "downloading"
+
+        Task {
+            defer { browseLoadingMore = false }
+            do {
+                let more = try await api.sectionItems(
+                    base: base, token: token, sectionKey: ref.sectionKey,
+                    type: type, sort: sort, start: startIndex, size: browsePageSize,
+                    onProgress: { [weak self] bytes in Task { @MainActor in self?.browseNet.bytes = bytes } }
+                )
+                guard browseKey == key else { return }
+                browseItems.append(contentsOf: more)
+                browseHasMore = more.count >= browsePageSize
+                browseNet.phase = "done"
+                browseNet.finishedSeconds = Date().timeIntervalSince(start)
+            } catch {
+                browseNet.phase = "failed"
+                browseNet.error = classify(error)
             }
         }
     }
@@ -735,6 +851,7 @@ private struct BrowseView: View {
 
             Menu {
                 Button("Reload") { model.loadLibraryTab() }
+                Toggle("Network Debug", isOn: $model.showNetDebug)
                 Button("Sign out", role: .destructive) { model.signOut() }
             } label: {
                 Image(systemName: "ellipsis.circle")
@@ -799,6 +916,16 @@ private struct LibraryRootView: View {
 private struct RecommendedTab: View {
     @ObservedObject var model: PlexPlayerViewModel
     var body: some View {
+        ZStack(alignment: .bottom) {
+            content
+            if model.showNetDebug {
+                NetDebugBar(stat: model.recommendedNet).padding(8)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var content: some View {
         if model.tabLoading && model.recommendedHubs.isEmpty {
             LoadingBanner(text: "Loading recommendations…")
         } else if model.recommendedHubs.isEmpty {
@@ -824,28 +951,42 @@ private struct BrowseTab: View {
         VStack(spacing: 0) {
             controls
             Divider()
-            switch model.libraryLoadState {
-            case .connecting:
-                LoadingBanner(text: "Contacting server…")
-            case .downloading:
-                LoadingBanner(text: "Downloading library…")
-            case .failed(let message):
-                VStack(spacing: 12) {
-                    Text(message).multilineTextAlignment(.center).foregroundStyle(.secondary)
-                    Button("Retry") { model.loadBrowse() }.buttonStyle(.borderedProminent)
+            ZStack(alignment: .bottom) {
+                loadStateContent
+                if model.showNetDebug {
+                    NetDebugBar(stat: model.browseNet).padding(8)
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity).padding()
-            case .idle, .ready:
-                if model.browseItems.isEmpty {
-                    EmptyBanner(text: "This library is empty.")
-                } else {
-                    ScrollView {
-                        LazyVGrid(columns: columns, spacing: 16) {
-                            ForEach(model.browseItems) { item in
-                                PosterCard(model: model, item: item) { model.open(item: item) }
-                            }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var loadStateContent: some View {
+        switch model.libraryLoadState {
+        case .connecting:
+            LoadingBanner(text: "Contacting server…")
+        case .downloading:
+            LoadingBanner(text: "Downloading library…")
+        case .failed(let message):
+            VStack(spacing: 12) {
+                Text(message).multilineTextAlignment(.center).foregroundStyle(.secondary)
+                Button("Retry") { model.loadBrowse() }.buttonStyle(.borderedProminent)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity).padding()
+        case .idle, .ready:
+            if model.browseItems.isEmpty {
+                EmptyBanner(text: "This library is empty.")
+            } else {
+                ScrollView {
+                    LazyVGrid(columns: columns, spacing: 16) {
+                        ForEach(model.browseItems) { item in
+                            PosterCard(model: model, item: item) { model.open(item: item) }
+                                .onAppear { model.loadMoreBrowseIfNeeded(currentItem: item) }
                         }
-                        .padding()
+                    }
+                    .padding()
+                    if model.browseLoadingMore {
+                        ProgressView().padding()
                     }
                 }
             }
@@ -1021,6 +1162,38 @@ private struct EmptyBanner: View {
     var body: some View {
         Text(text).foregroundStyle(.secondary)
             .frame(maxWidth: .infinity, maxHeight: .infinity).padding()
+    }
+}
+
+/// Compact network diagnostics overlay for the Recommended / Browse fetches.
+private struct NetDebugBar: View {
+    let stat: NetStat
+
+    private var tint: Color {
+        switch stat.phase {
+        case "failed": return .red
+        case "done": return .green
+        case "idle": return .gray
+        default: return .yellow
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 6) {
+                Circle().fill(tint).frame(width: 7, height: 7)
+                Text("NET · \(stat.label)").bold()
+                Spacer()
+                Text(stat.statusLine)
+            }
+            Text(stat.path).foregroundStyle(.secondary).lineLimit(1)
+            Text(stat.detailLine)
+        }
+        .font(.system(.caption2, design: .monospaced))
+        .foregroundStyle(.white)
+        .padding(8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.black.opacity(0.78), in: RoundedRectangle(cornerRadius: 8))
     }
 }
 
