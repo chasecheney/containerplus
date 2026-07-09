@@ -1731,37 +1731,91 @@ private struct FullPlayerView: View {
     @State private var scrubbing = false
     @State private var scrubValue: Double = 0
 
+    // Double-tap seek feedback (nil, or the signed seconds jumped).
+    @State private var seekFlash: Int?
+    @State private var seekFlashID = UUID()
+
     private var effectiveScale: CGFloat { min(max(zoom * pinch, 1.0), maxZoom) }
 
     var body: some View {
-        ZStack {
-            Color.black.ignoresSafeArea()
-            if let player = model.player {
-                PlayerLayerView(player: player)
-                    .scaleEffect(effectiveScale)
-                    .ignoresSafeArea()
-                    .gesture(
-                        MagnifyGesture()
-                            .updating($pinch) { value, state, _ in state = value.magnification }
-                            .onEnded { value in
-                                zoom = min(max(zoom * value.magnification, 1.0), maxZoom)
-                                if zoom < 1.05 { zoom = 1.0 }
-                            }
-                    )
-                    .simultaneousGesture(
-                        TapGesture(count: 2).onEnded {
-                            withAnimation(.easeOut(duration: 0.2)) { zoom = 1.0 }
-                        }
-                    )
+        GeometryReader { geo in
+            ZStack {
+                Color.black.ignoresSafeArea()
+                if let player = model.player {
+                    PlayerLayerView(player: player)
+                        .scaleEffect(effectiveScale)
+                        .ignoresSafeArea()
+                        .gesture(
+                            MagnifyGesture()
+                                .updating($pinch) { value, state, _ in state = value.magnification }
+                                .onEnded { value in
+                                    zoom = min(max(zoom * value.magnification, 1.0), maxZoom)
+                                    if zoom < 1.05 { zoom = 1.0 }
+                                }
+                        )
+                        // Double-tap left half = back 15s, right half = forward 15s.
+                        .simultaneousGesture(
+                            SpatialTapGesture(count: 2, coordinateSpace: .named("player"))
+                                .onEnded { value in doubleTapSeek(x: value.location.x, width: geo.size.width) }
+                        )
+                }
+                seekFeedbackOverlay
+                VStack(spacing: 0) {
+                    controlBar
+                    Spacer(minLength: 0)
+                    transportBar
+                }
             }
-            VStack(spacing: 0) {
-                controlBar
-                Spacer(minLength: 0)
-                transportBar
-            }
+            .coordinateSpace(name: "player")
         }
         .clipped()
         .animation(.easeOut(duration: 0.15), value: zoom)
+    }
+
+    private func doubleTapSeek(x: CGFloat, width: CGFloat) {
+        guard model.duration > 0 else { return }
+        if x < width / 2 {
+            model.skip(by: -15)
+            flashSeek(-15)
+        } else {
+            model.skip(by: 15)
+            flashSeek(15)
+        }
+    }
+
+    private func flashSeek(_ delta: Int) {
+        let id = UUID()
+        seekFlashID = id
+        withAnimation(.easeIn(duration: 0.1)) { seekFlash = delta }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+            if seekFlashID == id {
+                withAnimation(.easeOut(duration: 0.3)) { seekFlash = nil }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var seekFeedbackOverlay: some View {
+        if let delta = seekFlash {
+            HStack(spacing: 0) {
+                ZStack { if delta < 0 { seekBadge(systemName: "gobackward.15") } }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                ZStack { if delta > 0 { seekBadge(systemName: "goforward.15") } }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+            .allowsHitTesting(false)
+        }
+    }
+
+    private func seekBadge(systemName: String) -> some View {
+        VStack(spacing: 6) {
+            Image(systemName: systemName).font(.system(size: 46, weight: .semibold))
+            Text("15 sec").font(.caption).bold()
+        }
+        .foregroundStyle(.white)
+        .padding(28)
+        .background(.black.opacity(0.4), in: Circle())
+        .transition(.scale.combined(with: .opacity))
     }
 
     // Top bar: navigation + settings-style controls.
