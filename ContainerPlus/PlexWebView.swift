@@ -58,10 +58,11 @@ final class PlexViewModel: NSObject, ObservableObject, WKNavigationDelegate, WKU
     private var saveTask: Task<Void, Never>?
     private func scheduleSaveLastURL(_ urlString: String) {
         saveTask?.cancel()
+        let account = Self.keychainAccount   // read on the main actor, capture the value
         saveTask = Task.detached {
             try? await Task.sleep(nanoseconds: 3_000_000_000)
             if Task.isCancelled { return }
-            KeychainHelper.set(urlString, for: Self.keychainAccount)
+            KeychainHelper.set(urlString, for: account)
         }
     }
 
