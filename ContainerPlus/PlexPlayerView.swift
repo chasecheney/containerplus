@@ -570,6 +570,24 @@ final class PlexPlayerViewModel: ObservableObject {
         Task { await startPlayback(queue[0], resumeAt: nil) }
     }
 
+    /// Queue `item` to play right after the current one (or start it if nothing
+    /// is playing).
+    func playNext(_ item: PlexMetadata) {
+        guard item.isPlayable else { return }
+        guard player != nil else { playSingle(item); return }
+        playQueue.insert(item, at: min(queueIndex + 1, playQueue.count))
+    }
+
+    /// Append `item` to the end of the queue (or start it if nothing is playing).
+    func addToQueue(_ item: PlexMetadata) {
+        guard item.isPlayable else { return }
+        guard player != nil else { playSingle(item); return }
+        playQueue.append(item)
+    }
+
+    /// Number of items still queued after the current one.
+    var upNextCount: Int { max(0, playQueue.count - queueIndex - 1) }
+
     private func advanceQueue() {
         queueIndex += 1
         if queueIndex < playQueue.count {
@@ -1115,6 +1133,20 @@ private struct PosterCard: View {
     let action: () -> Void
 
     var body: some View {
+        // Only playable items get a context menu, so a long-press on a
+        // folder/show doesn't lift an empty menu.
+        if item.isPlayable {
+            card.contextMenu {
+                Button { action() } label: { Label("Play", systemImage: "play.fill") }
+                Button { model.playNext(item) } label: { Label("Play Next", systemImage: "text.insert") }
+                Button { model.addToQueue(item) } label: { Label("Add to Queue", systemImage: "text.badge.plus") }
+            }
+        } else {
+            card
+        }
+    }
+
+    private var card: some View {
         Button(action: action) {
             VStack(alignment: .leading, spacing: 6) {
                 ZStack {
