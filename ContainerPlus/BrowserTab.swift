@@ -100,7 +100,8 @@ final class BrowserTab: NSObject, ObservableObject, Identifiable {
            let url = URL(string: "https://\(text)") {
             return url
         }
-        let q = text.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? text
+        // .alphanumerics so "&", "=", "+" etc. in the query are escaped.
+        let q = text.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? text
         return URL(string: "https://www.google.com/search?q=\(q)")!
     }
 

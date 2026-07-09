@@ -159,6 +159,11 @@ final class PlexPlayerViewModel: ObservableObject {
     private var chaseTime: CMTime = .zero
     private var wasPlayingBeforeScrub = false
 
+    // Playback bookkeeping
+    private var playbackGeneration = 0           // guards against superseded startPlayback calls
+    private var activeTranscodeSession: String?  // to stop the transcode on teardown
+    private var lastTimelineReport = Date.distantPast
+
     // Play queue
     @Published private(set) var playQueue: [PlexMetadata] = []
     @Published private(set) var queueIndex = 0
@@ -687,13 +692,26 @@ final class PlexPlayerViewModel: ObservableObject {
 
     private func startPlayback(_ requested: PlexMetadata, resumeAt: CMTime?) async {
         guard let base = baseURL, let token = serverToken else { return }
+
+        // Guard against superseded calls (rapid next/next, quality change mid-fetch).
+        playbackGeneration += 1
+        let generation = playbackGeneration
+
         // Ensure we know the real container/codecs before deciding direct-play
         // vs transcode; list metadata often omits them.
         var item = requested
         if item.partContainer == nil, let detailed = try? await api.metadata(base: base, token: token, ratingKey: item.ratingKey) {
             item = detailed
         }
-        guard let url = api.playbackURL(base: base, token: token, item: item, quality: quality) else { return }
+        guard generation == playbackGeneration else { return } // a newer call won
+
+        let session = UUID().uuidString
+        let transcoding = api.willTranscode(item: item, quality: quality)
+        guard let url = api.playbackURL(base: base, token: token, item: item, quality: quality, session: session) else { return }
+
+        // Report the outgoing item as stopped and stop its transcode session.
+        reportTimeline("stopped")
+        stopActiveTranscode()
 
         // Fully stop the outgoing player so its audio doesn't keep playing
         // while the new item takes over.
@@ -709,6 +727,7 @@ final class PlexPlayerViewModel: ObservableObject {
         }
         currentTime = 0
         duration = 0
+        activeTranscodeSession = transcoding ? session : nil
 
         let player = AVPlayer(url: url)
         observeTime(player)
@@ -730,9 +749,30 @@ final class PlexPlayerViewModel: ObservableObject {
             isPlayerMinimized = false
         }
         player.play()
+        reportTimeline("playing")
         if let currentItem = player.currentItem {
             Task { await loadTracks(for: currentItem) }
         }
+    }
+
+    // MARK: Timeline / transcode session
+
+    private func reportTimeline(_ state: String) {
+        guard let base = baseURL, let token = serverToken, let item = nowPlayingItem else { return }
+        lastTimelineReport = Date()
+        let timeMs = Int(currentTime * 1000)
+        let durationMs = Int(duration * 1000)
+        Task {
+            await api.reportTimeline(base: base, token: token,
+                                     ratingKey: item.ratingKey, key: item.key,
+                                     state: state, timeMs: timeMs, durationMs: durationMs)
+        }
+    }
+
+    private func stopActiveTranscode() {
+        guard let session = activeTranscodeSession, let base = baseURL, let token = serverToken else { return }
+        activeTranscodeSession = nil
+        Task { await api.stopTranscode(base: base, token: token, session: session) }
     }
 
     // MARK: Audio / subtitle tracks
@@ -834,6 +874,10 @@ final class PlexPlayerViewModel: ObservableObject {
                    itemDuration.isFinite, itemDuration > 0 {
                     self.duration = itemDuration
                 }
+                // Report progress to Plex ~every 10s while playing.
+                if self.isPlaying, Date().timeIntervalSince(self.lastTimelineReport) >= 10 {
+                    self.reportTimeline("playing")
+                }
             }
         }
     }
@@ -901,7 +945,13 @@ final class PlexPlayerViewModel: ObservableObject {
 
     func togglePlayPause() {
         guard let player else { return }
-        if player.timeControlStatus == .playing { player.pause() } else { player.play() }
+        if player.timeControlStatus == .playing {
+            player.pause()
+            reportTimeline("paused")
+        } else {
+            player.play()
+            reportTimeline("playing")
+        }
     }
 
     /// In-app volume, independent of the device's hardware volume.
@@ -923,6 +973,8 @@ final class PlexPlayerViewModel: ObservableObject {
     func expandPlayer() { withAnimation(.easeInOut(duration: 0.25)) { isPlayerMinimized = false } }
 
     func closePlayer() {
+        reportTimeline("stopped")
+        stopActiveTranscode()
         statusObservation?.invalidate()
         statusObservation = nil
         if let endObserver { NotificationCenter.default.removeObserver(endObserver) }

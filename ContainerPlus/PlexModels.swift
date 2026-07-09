@@ -56,7 +56,10 @@ struct PlexHub: Decodable, Identifiable {
     let type: String?
     let metadata: [PlexMetadata]?
 
-    var id: String { hubIdentifier ?? title ?? UUID().uuidString }
+    /// Stable per-instance fallback so a hub with no identifier/title doesn't
+    /// get a new identity on every render (which would defeat SwiftUI diffing).
+    private let fallbackID = UUID().uuidString
+    var id: String { hubIdentifier ?? title ?? fallbackID }
 
     enum CodingKeys: String, CodingKey {
         case hubIdentifier, title, type

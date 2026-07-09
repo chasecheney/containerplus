@@ -18,26 +18,20 @@ enum ContainerType: String, CaseIterable, Identifiable {
     }
 }
 
-/// Backing state for a single pane. Each pane keeps its own long-lived
-/// container instances so that switching the picker (or resizing the split)
-/// never throws away browser tabs or the Plex session.
+/// Backing state for a single pane. Container instances are created **lazily**
+/// on first use, so a pane doesn't spin up a WKWebView / Plex session it never
+/// shows. Once created they're long-lived, so switching the picker (or resizing
+/// the split) never throws away browser tabs or the Plex session.
 final class PaneModel: ObservableObject, Identifiable {
     let id = UUID()
     @Published var selection: ContainerType
 
-    /// Long-lived so the tab set survives container switches.
-    let browser: BrowserViewModel
-    /// Long-lived so Plex cookies / playback survive container switches.
-    let plex: PlexViewModel
-    /// Long-lived so the Plex session / browse state survives container switches.
-    let plexPlayer: PlexPlayerViewModel
+    /// Created on first access; the browser opens its home tab in its own init.
+    lazy var browser = BrowserViewModel()
+    lazy var plex = PlexViewModel()
+    lazy var plexPlayer = PlexPlayerViewModel()
 
-    init(selection: ContainerType, homeURL: URL? = nil) {
+    init(selection: ContainerType) {
         self.selection = selection
-        self.browser = BrowserViewModel()
-        self.plex = PlexViewModel()
-        self.plexPlayer = PlexPlayerViewModel()
-        // Opens the configured home page (or an explicit override).
-        self.browser.newTab(url: homeURL, select: true)
     }
 }

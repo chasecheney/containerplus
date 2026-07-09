@@ -189,7 +189,8 @@ final class PlexAPI {
                        type: Int?, query: String,
                        onResponse: @escaping (Int) -> Void = { _ in },
                        onProgress: @escaping (Int) -> Void = { _ in }) async throws -> [PlexMetadata] {
-        func enc(_ s: String) -> String { s.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? s }
+        // .alphanumerics so "&" and "=" in the query are escaped (urlQueryAllowed leaves them raw).
+        func enc(_ s: String) -> String { s.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? s }
         var params = ["title=" + enc(query), "X-Plex-Container-Start=0", "X-Plex-Container-Size=200"]
         if let type { params.append("type=\(type)") }
         let path = "/library/sections/\(sectionKey)/all?" + params.joined(separator: "&")
@@ -272,15 +273,24 @@ final class PlexAPI {
         return URL(string: base.absoluteString + path + "?X-Plex-Token=" + token)
     }
 
+    /// Whether the given item at the given quality will be transcoded (vs
+    /// direct-played). The caller uses this to know if it must later stop the
+    /// transcode session.
+    func willTranscode(item: PlexMetadata, quality: PlexQuality) -> Bool {
+        !(quality == .original && item.partKey != nil && canDirectPlay(item))
+    }
+
     /// A URL AVPlayer can play at the requested quality. `.original` direct-plays
     /// only files AVFoundation can natively handle (mp4/mov/m4v with H.264/HEVC
     /// video and AAC/MP3 audio); anything else — e.g. AVI or MKV — is sent to
-    /// the Plex universal transcoder (HLS). Other qualities always transcode.
-    func playbackURL(base: URL, token: String, item: PlexMetadata, quality: PlexQuality) -> URL? {
+    /// the Plex universal transcoder (HLS). `session` identifies the transcode
+    /// so it can be stopped later.
+    func playbackURL(base: URL, token: String, item: PlexMetadata,
+                     quality: PlexQuality, session: String) -> URL? {
         if quality == .original, let partKey = item.partKey, canDirectPlay(item) {
             return URL(string: base.absoluteString + partKey + "?X-Plex-Token=" + token)
         }
-        return transcodeURL(base: base, token: token, item: item, quality: quality)
+        return transcodeURL(base: base, token: token, item: item, quality: quality, session: session)
     }
 
     /// Whether AVFoundation can most likely play the file as-is.
@@ -294,12 +304,12 @@ final class PlexAPI {
         return okVideo && okAudio
     }
 
-    func transcodeURL(base: URL, token: String, item: PlexMetadata, quality: PlexQuality) -> URL? {
+    func transcodeURL(base: URL, token: String, item: PlexMetadata,
+                      quality: PlexQuality, session: String) -> URL? {
         func enc(_ s: String) -> String {
             s.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? s
         }
         // A per-playback session id is required by the universal transcoder.
-        let session = UUID().uuidString
         var params = [
             "path=" + enc("/library/metadata/\(item.ratingKey)"),
             "mediaIndex=0",
@@ -325,6 +335,39 @@ final class PlexAPI {
         }
         return URL(string: base.absoluteString + "/video/:/transcode/universal/start.m3u8?"
                    + params.joined(separator: "&"))
+    }
+
+    /// Tells the server to stop a universal-transcode session so it doesn't keep
+    /// transcoding until its own timeout.
+    func stopTranscode(base: URL, token: String, session: String) async {
+        func enc(_ s: String) -> String { s.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? s }
+        let path = "/video/:/transcode/universal/stop?session=\(enc(session))"
+            + "&X-Plex-Client-Identifier=\(enc(clientID))&X-Plex-Token=\(enc(token))"
+        guard let url = URL(string: base.absoluteString + path) else { return }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        for (k, v) in headers(token: token) { req.setValue(v, forHTTPHeaderField: k) }
+        _ = try? await URLSession.shared.data(for: req)
+    }
+
+    /// Reports playback progress so the server updates On Deck / resume points /
+    /// watched state. `state` is playing / paused / stopped.
+    func reportTimeline(base: URL, token: String, ratingKey: String, key: String,
+                        state: String, timeMs: Int, durationMs: Int) async {
+        func enc(_ s: String) -> String { s.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? s }
+        let params = [
+            "ratingKey=\(enc(ratingKey))",
+            "key=\(enc(key))",
+            "state=\(state)",
+            "time=\(max(0, timeMs))",
+            "duration=\(max(0, durationMs))",
+            "hasMDE=1",
+            "X-Plex-Client-Identifier=\(enc(clientID))",
+            "X-Plex-Token=\(enc(token))",
+        ]
+        guard let url = URL(string: base.absoluteString + "/:/timeline?" + params.joined(separator: "&")) else { return }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        for (k, v) in headers(token: token) { req.setValue(v, forHTTPHeaderField: k) }
+        _ = try? await URLSession.shared.data(for: req)
     }
 }
 

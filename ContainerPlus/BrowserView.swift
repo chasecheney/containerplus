@@ -96,7 +96,7 @@ private struct TabStrip: View {
             }
 
             Button {
-                model.newTab(url: URL(string: "https://www.google.com")!)
+                model.newTab()
             } label: {
                 Image(systemName: "plus")
             }

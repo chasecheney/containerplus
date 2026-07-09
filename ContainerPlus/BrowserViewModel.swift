@@ -16,6 +16,11 @@ final class BrowserViewModel: ObservableObject {
 
     let store = BrowserStore.shared
 
+    init() {
+        // Open the home page in an initial tab (created lazily with the pane).
+        newTab()
+    }
+
     var selectedTab: BrowserTab? {
         tabs.first { $0.id == selectedTabID }
     }
