@@ -438,7 +438,7 @@ final class PlexPlayerViewModel: ObservableObject {
     func playSingle(_ item: PlexMetadata) {
         playQueue = [item]
         queueIndex = 0
-        startPlayback(item, resumeAt: nil)
+        Task { await startPlayback(item, resumeAt: nil) }
     }
 
     func playAll(_ items: [PlexMetadata], shuffle: Bool) {
@@ -447,21 +447,28 @@ final class PlexPlayerViewModel: ObservableObject {
         if shuffle { queue.shuffle() }
         playQueue = queue
         queueIndex = 0
-        startPlayback(queue[0], resumeAt: nil)
+        Task { await startPlayback(queue[0], resumeAt: nil) }
     }
 
     private func advanceQueue() {
         queueIndex += 1
         if queueIndex < playQueue.count {
-            startPlayback(playQueue[queueIndex], resumeAt: nil)
+            let next = playQueue[queueIndex]
+            Task { await startPlayback(next, resumeAt: nil) }
         } else {
             closePlayer()
         }
     }
 
-    private func startPlayback(_ item: PlexMetadata, resumeAt: CMTime?) {
-        guard let base = baseURL, let token = serverToken,
-              let url = api.playbackURL(base: base, token: token, item: item, quality: quality) else { return }
+    private func startPlayback(_ requested: PlexMetadata, resumeAt: CMTime?) async {
+        guard let base = baseURL, let token = serverToken else { return }
+        // Ensure we know the real container/codecs before deciding direct-play
+        // vs transcode; list metadata often omits them.
+        var item = requested
+        if item.partContainer == nil, let detailed = try? await api.metadata(base: base, token: token, ratingKey: item.ratingKey) {
+            item = detailed
+        }
+        guard let url = api.playbackURL(base: base, token: token, item: item, quality: quality) else { return }
         let player = AVPlayer(url: url)
         if let resumeAt {
             player.seek(to: resumeAt)
@@ -544,7 +551,8 @@ final class PlexPlayerViewModel: ObservableObject {
         guard newQuality != quality else { return }
         quality = newQuality
         guard let item = nowPlayingItem, let player else { return }
-        startPlayback(item, resumeAt: player.currentTime())
+        let resume = player.currentTime()
+        Task { await startPlayback(item, resumeAt: resume) }
     }
 
     func presentInfo() {

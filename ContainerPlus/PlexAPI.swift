@@ -230,25 +230,34 @@ final class PlexAPI {
         return URL(string: base.absoluteString + path + "?X-Plex-Token=" + token)
     }
 
-    /// A URL AVPlayer can play at the requested quality. `.original` uses
-    /// direct play for AVFoundation-friendly containers, otherwise the Plex
-    /// universal transcoder (HLS). Other qualities force a transcode.
+    /// A URL AVPlayer can play at the requested quality. `.original` direct-plays
+    /// only files AVFoundation can natively handle (mp4/mov/m4v with H.264/HEVC
+    /// video and AAC/MP3 audio); anything else — e.g. AVI or MKV — is sent to
+    /// the Plex universal transcoder (HLS). Other qualities always transcode.
     func playbackURL(base: URL, token: String, item: PlexMetadata, quality: PlexQuality) -> URL? {
-        if quality == .original {
-            let friendly: Set<String> = ["mp4", "mov", "m4v"]
-            if let partKey = item.partKey,
-               let container = item.partContainer?.lowercased(),
-               friendly.contains(container) {
-                return URL(string: base.absoluteString + partKey + "?X-Plex-Token=" + token)
-            }
+        if quality == .original, let partKey = item.partKey, canDirectPlay(item) {
+            return URL(string: base.absoluteString + partKey + "?X-Plex-Token=" + token)
         }
         return transcodeURL(base: base, token: token, item: item, quality: quality)
+    }
+
+    /// Whether AVFoundation can most likely play the file as-is.
+    func canDirectPlay(_ item: PlexMetadata) -> Bool {
+        guard let container = item.partContainer?.lowercased(),
+              ["mp4", "mov", "m4v"].contains(container) else { return false }
+        let video = item.media?.first?.videoCodec?.lowercased()
+        let audio = item.media?.first?.audioCodec?.lowercased()
+        let okVideo = video.map { ["h264", "hevc", "h265", "mpeg4"].contains($0) } ?? false
+        let okAudio = audio.map { ["aac", "mp3", "alac"].contains($0) } ?? true
+        return okVideo && okAudio
     }
 
     func transcodeURL(base: URL, token: String, item: PlexMetadata, quality: PlexQuality) -> URL? {
         func enc(_ s: String) -> String {
             s.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? s
         }
+        // A per-playback session id is required by the universal transcoder.
+        let session = UUID().uuidString
         var params = [
             "path=" + enc("/library/metadata/\(item.ratingKey)"),
             "mediaIndex=0",
@@ -257,8 +266,10 @@ final class PlexAPI {
             "fastSeek=1",
             "directPlay=0",
             "directStream=1",
-            "subtitles=burn",
+            "subtitles=auto",
             "videoQuality=100",
+            "session=" + enc(session),
+            "X-Plex-Session-Identifier=" + enc(session),
             "X-Plex-Client-Identifier=" + enc(clientID),
             "X-Plex-Product=" + enc(product),
             "X-Plex-Platform=" + enc(platform),
