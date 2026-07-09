@@ -1592,12 +1592,40 @@ private struct MiniPlayerBar: View {
 
 private struct FullPlayerView: View {
     @ObservedObject var model: PlexPlayerViewModel
+
+    // Pinch-to-zoom state (centered magnification of the video).
+    @State private var zoom: CGFloat = 1.0
+    @GestureState private var pinch: CGFloat = 1.0
+    private let maxZoom: CGFloat = 4.0
+
+    private var effectiveScale: CGFloat { min(max(zoom * pinch, 1.0), maxZoom) }
+
     var body: some View {
         ZStack(alignment: .top) {
             Color.black.ignoresSafeArea()
-            if let player = model.player { VideoPlayer(player: player).ignoresSafeArea() }
+            if let player = model.player {
+                VideoPlayer(player: player)
+                    .scaleEffect(effectiveScale)
+                    .ignoresSafeArea()
+                    .gesture(
+                        MagnifyGesture()
+                            .updating($pinch) { value, state, _ in state = value.magnification }
+                            .onEnded { value in
+                                zoom = min(max(zoom * value.magnification, 1.0), maxZoom)
+                                if zoom < 1.05 { zoom = 1.0 }
+                            }
+                    )
+                    // Double-tap to snap back to standard.
+                    .simultaneousGesture(
+                        TapGesture(count: 2).onEnded {
+                            withAnimation(.easeOut(duration: 0.2)) { zoom = 1.0 }
+                        }
+                    )
+            }
             controlBar
         }
+        .clipped()
+        .animation(.easeOut(duration: 0.15), value: zoom)
     }
 
     private var controlBar: some View {
@@ -1661,6 +1689,14 @@ private struct FullPlayerView: View {
             }
             .menuIndicator(.hidden)
             .help("Playback quality")
+
+            // Reset zoom (only shown while zoomed in).
+            if zoom > 1.01 {
+                Button { withAnimation(.easeOut(duration: 0.2)) { zoom = 1.0 } } label: {
+                    Image(systemName: "arrow.down.right.and.arrow.up.left").font(.title3)
+                }
+                .help("Reset zoom")
+            }
 
             // Play queue.
             Button { model.showQueue = true } label: {
