@@ -635,6 +635,18 @@ final class PlexPlayerViewModel: ObservableObject {
             item = detailed
         }
         guard let url = api.playbackURL(base: base, token: token, item: item, quality: quality) else { return }
+
+        // Fully stop the outgoing player so its audio doesn't keep playing
+        // while the new item takes over.
+        statusObservation?.invalidate()
+        statusObservation = nil
+        if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
+        endObserver = nil
+        if let existing = self.player {
+            existing.pause()
+            existing.replaceCurrentItem(with: nil)
+        }
+
         let player = AVPlayer(url: url)
         if let resumeAt {
             player.seek(to: resumeAt) { _ in }
