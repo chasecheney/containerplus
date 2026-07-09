@@ -102,7 +102,9 @@ private struct TabStrip: View {
             }
             .buttonStyle(.borderless)
             .help("New Tab")
-            .padding(.horizontal, 8)
+            .padding(.leading, 8)
+            // Reserve the top-right corner for the pane's container picker.
+            .padding(.trailing, containerPickerReservedWidth)
         }
         .background(.bar)
     }

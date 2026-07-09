@@ -32,20 +32,30 @@ struct ContentView: View {
     }
 }
 
+/// Width reserved at the top-right of a pane's own toolbar for the container
+/// picker, so it doesn't overlap the container's controls.
+let containerPickerReservedWidth: CGFloat = 46
+
 /// Chrome around a pane. The container content fills the whole pane. A small
-/// floating menu button in the bottom-trailing corner switches the container.
+/// floating menu button switches the container — top-right for most containers,
+/// but bottom-right for Plex Web (whose own site UI lives in the top-right).
 /// It's a real control layered above the content, so it works reliably even
 /// over a `WKWebView` (unlike a gesture, which the web view would swallow).
 struct ContainerHostView: View {
     @ObservedObject var pane: PaneModel
 
+    private var pickerAlignment: Alignment {
+        pane.selection == .plexWeb ? .bottomTrailing : .topTrailing
+    }
+
     var body: some View {
-        ZStack(alignment: .bottomTrailing) {
+        ZStack(alignment: pickerAlignment) {
             content
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
 
             FloatingContainerMenu(pane: pane)
-                .padding(12)
+                .padding(.horizontal, 10)
+                .padding(pane.selection == .plexWeb ? .bottom : .top, 8)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .clipped()
