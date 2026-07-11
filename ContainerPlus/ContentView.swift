@@ -70,6 +70,8 @@ struct ContainerHostView: View {
             BrowserContainerView(model: pane.browser)
         case .plexPlayer:
             PlexPlayerContainerView(model: pane.plexPlayer)
+        case .storyReader:
+            StoryReaderContainerView(model: pane.storyReader)
         }
     }
 }

@@ -4,10 +4,10 @@ A **multiplatform** app (macOS + iPadOS) that shows two **containers** side by
 side. The divider between them is draggable and **snaps at 25%, 50% and 75%**
 of the width.
 
-The container fills the whole pane. A small **floating menu button** in the
-bottom-trailing corner switches the container (and offers "Refresh to Plex
-Home" when Plex Web is showing). It's a real control layered above the content,
-so it works reliably even over web views. Three containers are built in:
+The container fills the whole pane. A small **floating menu button** switches
+the container (and offers "Refresh to Plex Home" when Plex Web is showing).
+It's a real control layered above the content, so it works reliably even over
+web views. Four containers are built in:
 
 ## Plex Web
 A locked web view for [app.plex.tv](https://app.plex.tv). There is no address
@@ -75,6 +75,18 @@ Networking lives in `PlexAPI.swift` / `PlexModels.swift`; UI + state in
 `PlexPlayerView.swift`. On iPad, reaching a server on your LAN triggers the
 system local-network permission prompt (declared via
 `NSLocalNetworkUsageDescription`).
+
+## Story Reader
+A **read-only** reader for Story Reader / Story Navigator `.storybundle`
+library files (a compressed, single-file bundle: header + manifest + LZFSE
+story blobs). Open a bundle and it lists stories grouped into series (shared
+`FilenameParser` logic), filterable by **tag** and searchable by title/tag —
+tags are for navigation only, with no editing, tagging, or spell-check. The
+reader has adjustable text size, serif/sans, light/sepia/dark themes,
+previous/next-part navigation, favorites, read status, and resume position
+(all stored locally; the bundle carries content, not reading state). Stories
+are decompressed on demand straight from the bundle. Code: `StoryBundle.swift`,
+`StoryFilenameParser.swift`, `StoryModels.swift`, `StoryReaderView.swift`.
 
 > Note: the transcode URL uses sensible default parameters; depending on your
 > server and media you may want to tune bitrate/quality in `PlexAPI.transcodeURL`.

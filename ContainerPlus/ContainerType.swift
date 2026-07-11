@@ -6,6 +6,7 @@ enum ContainerType: String, CaseIterable, Identifiable {
     case plexWeb = "Plex Web"
     case webBrowser = "Web Browser"
     case plexPlayer = "Plex Player"
+    case storyReader = "Story Reader"
 
     var id: String { rawValue }
 
@@ -14,6 +15,7 @@ enum ContainerType: String, CaseIterable, Identifiable {
         case .plexWeb: return "play.rectangle.fill"
         case .webBrowser: return "globe"
         case .plexPlayer: return "play.circle.fill"
+        case .storyReader: return "books.vertical.fill"
         }
     }
 }
@@ -30,6 +32,7 @@ final class PaneModel: ObservableObject, Identifiable {
     lazy var browser = BrowserViewModel()
     lazy var plex = PlexViewModel()
     lazy var plexPlayer = PlexPlayerViewModel()
+    lazy var storyReader = StoryReaderViewModel()
 
     init(selection: ContainerType) {
         self.selection = selection
