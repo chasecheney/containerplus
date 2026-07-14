@@ -9,6 +9,9 @@ struct StoryItem: Identifiable, Hashable {
     let seriesKey: String
     let tags: [String]
     let size: Int
+    /// Precomputed lowercased "title + tags" so search never re-lowercases at
+    /// scale.
+    let searchKey: String
 
     static func == (lhs: StoryItem, rhs: StoryItem) -> Bool { lhs.stem == rhs.stem }
     func hash(into hasher: inout Hasher) { hasher.combine(stem) }
@@ -18,6 +21,9 @@ struct StoryItem: Identifiable, Hashable {
 struct StorySeries: Identifiable, Hashable {
     let id: String            // lowercased series key
     let title: String
+    /// Precomputed natural-sort key (digit runs zero-padded) so ordering is a
+    /// plain `String <` — far cheaper than `localizedStandardCompare` at scale.
+    let sortKey: String
     var stories: [StoryItem]  // natural-sorted by title
     var tags: [String] { Array(Set(stories.flatMap { $0.tags })).sorted() }
 }

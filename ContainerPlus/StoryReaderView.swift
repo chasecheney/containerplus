@@ -29,17 +29,24 @@ final class StoryReaderViewModel: ObservableObject {
     @Published private(set) var bundleName = ""
     @Published private(set) var allTags: [String] = []
     @Published private(set) var visibleSeries: [StorySeries] = []
+    @Published private(set) var totalSeriesCount = 0
     @Published private(set) var filter: Filter = .all
-    @Published var searchText = "" { didSet { applyFilter() } }
+    @Published var searchText = "" { didSet { scheduleSearch() } }
     @Published var selectedStem: String?
 
     private var series: [StorySeries] = []
+    private var seriesByKey: [String: StorySeries] = [:]
     private var storiesByStem: [String: StoryItem] = [:]
     private var entriesByStem: [String: StoryBundle.ManifestEntry] = [:]
     private var blobStart: UInt64 = 0
     private var accessURL: URL?      // security-scoped, access started for the session
 
     private var states: [String: StoryReadingState] = [:]
+
+    private var searchTask: Task<Void, Never>?
+    private var filterGeneration = 0
+    /// Cap on how many series are rendered at once (search/tags narrow it).
+    private static let displayCap = 800
 
     private let bookmarkKey = "storyreader.bundleBookmark"
     private let statesKey = "storyreader.readingStates"
@@ -62,83 +69,89 @@ final class StoryReaderViewModel: ObservableObject {
     func open(url: URL, persistBookmark: Bool = true) {
         phase = .loading
         let started = url.startAccessingSecurityScopedResource()
-        do {
-            let (manifest, blobStart) = try StoryBundle.readManifest(at: url)
-            // Swap in the new access URL (release the previous one).
-            if let old = accessURL, old != url { old.stopAccessingSecurityScopedResource() }
-            accessURL = started ? url : accessURL
-            self.blobStart = blobStart
-            bundleName = url.deletingPathExtension().lastPathComponent
-            buildIndex(from: manifest.entries)
-            if persistBookmark, let data = Self.makeBookmark(url) {
-                UserDefaults.standard.set(data, forKey: bookmarkKey)
+        Task {
+            do {
+                // Parse/group/sort off the main thread (cached to disk, so a
+                // second open of the same bundle is instant).
+                let built = try await Task.detached(priority: .userInitiated) {
+                    try StoryIndex.open(url: url)
+                }.value
+
+                if let old = accessURL, old != url { old.stopAccessingSecurityScopedResource() }
+                accessURL = started ? url : accessURL
+                storiesByStem = built.storiesByStem
+                entriesByStem = built.entriesByStem
+                series = built.series
+                seriesByKey = Dictionary(uniqueKeysWithValues: built.series.map { ($0.id, $0) })
+                allTags = built.allTags
+                blobStart = built.blobStart
+                bundleName = url.deletingPathExtension().lastPathComponent
+                phase = .ready
+                applyFilter()
+
+                if persistBookmark, let data = Self.makeBookmark(url) {
+                    UserDefaults.standard.set(data, forKey: bookmarkKey)
+                }
+            } catch {
+                if started { url.stopAccessingSecurityScopedResource() }
+                phase = .error(error.localizedDescription)
             }
-            phase = .ready
-        } catch {
-            if started { url.stopAccessingSecurityScopedResource() }
-            phase = .error(error.localizedDescription)
         }
     }
 
-    private func buildIndex(from entries: [StoryBundle.ManifestEntry]) {
-        entriesByStem = [:]
-        storiesByStem = [:]
-        var byKey: [String: (title: String, items: [StoryItem])] = [:]
-        var tagSet = Set<String>()
-
-        for entry in entries {
-            entriesByStem[entry.stem] = entry
-            let parsed = StoryFilenameParser.parse(stem: entry.stem)
-            let seriesKey = StoryFilenameParser.baseTitle(parsed.title).lowercased()
-            let item = StoryItem(id: parsed.storyID ?? entry.stem,
-                                 stem: entry.stem,
-                                 title: parsed.title,
-                                 seriesKey: seriesKey,
-                                 tags: parsed.tags,
-                                 size: Int(entry.size))
-            storiesByStem[entry.stem] = item
-            parsed.tags.forEach { tagSet.insert($0) }
-            if byKey[seriesKey] == nil {
-                byKey[seriesKey] = (StoryFilenameParser.baseTitle(parsed.title), [])
-            }
-            byKey[seriesKey]?.items.append(item)
-        }
-
-        series = byKey.map { key, value in
-            StorySeries(id: key,
-                        title: value.title,
-                        stories: value.items.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending })
-        }
-        .sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
-
-        allTags = tagSet.sorted()
-        applyFilter()
-    }
-
-    // MARK: Filtering
+    // MARK: Filtering (off-main, generation-guarded, capped)
 
     func setFilter(_ newFilter: Filter) {
         filter = newFilter
         applyFilter()
     }
 
+    private func scheduleSearch() {
+        searchTask?.cancel()
+        searchTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            if Task.isCancelled { return }
+            self?.applyFilter()
+        }
+    }
+
     private func applyFilter() {
+        filterGeneration += 1
+        let generation = filterGeneration
+        let snapshot = series
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        visibleSeries = series.compactMap { group in
-            let matches = group.stories.filter { story in
-                let tagOK: Bool
-                switch filter {
-                case .all: tagOK = true
-                case .favorites: tagOK = state(forID: story.id).favorite
-                case .tag(let t): tagOK = story.tags.contains(t)
+        let filter = self.filter
+        let states = self.states
+        let cap = Self.displayCap
+
+        Task.detached(priority: .userInitiated) { [weak self] in
+            var out: [StorySeries] = []
+            out.reserveCapacity(min(snapshot.count, cap))
+            var total = 0
+            for group in snapshot {
+                let matches = group.stories.filter { story in
+                    switch filter {
+                    case .all: break
+                    case .favorites: if !(states[story.id]?.favorite ?? false) { return false }
+                    case .tag(let t): if !story.tags.contains(t) { return false }
+                    }
+                    return query.isEmpty || story.searchKey.contains(query)
                 }
-                guard tagOK else { return false }
-                if query.isEmpty { return true }
-                return story.title.lowercased().contains(query)
-                    || story.tags.contains { $0.contains(query) }
-                    || group.title.lowercased().contains(query)
+                guard !matches.isEmpty else { continue }
+                total += 1
+                if out.count < cap {
+                    out.append(matches.count == group.stories.count
+                               ? group
+                               : StorySeries(id: group.id, title: group.title, sortKey: group.sortKey, stories: matches))
+                }
             }
-            return matches.isEmpty ? nil : StorySeries(id: group.id, title: group.title, stories: matches)
+            let result = out
+            let totalCount = total
+            await MainActor.run { [weak self] in
+                guard let self, self.filterGeneration == generation else { return }
+                self.visibleSeries = result
+                self.totalSeriesCount = totalCount
+            }
         }
     }
 
@@ -159,7 +172,7 @@ final class StoryReaderViewModel: ObservableObject {
     /// The previous/next part within the same series.
     func neighbor(ofStem stem: String, offset: Int) -> StoryItem? {
         guard let story = storiesByStem[stem],
-              let group = series.first(where: { $0.id == story.seriesKey }),
+              let group = seriesByKey[story.seriesKey],
               let idx = group.stories.firstIndex(of: story) else { return nil }
         let target = idx + offset
         return group.stories.indices.contains(target) ? group.stories[target] : nil
@@ -302,6 +315,12 @@ private struct StoryListPane: View {
                 Text("No stories match.").foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
+                if model.totalSeriesCount > model.visibleSeries.count {
+                    Text("Showing \(model.visibleSeries.count) of \(model.totalSeriesCount) series — refine with search or a tag.")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 12).padding(.bottom, 4)
+                }
                 List {
                     ForEach(model.visibleSeries) { group in
                         Section(group.stories.count > 1 ? group.title : "") {
