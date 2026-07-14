@@ -17,3 +17,7 @@ xcuserdata/
 # Swift Package Manager
 .build/
 Packages/
+
+# Release artifacts (attach to GitHub Releases, not git)
+*.dmg
+*.dmg.sha256
