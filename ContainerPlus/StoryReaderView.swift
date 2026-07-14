@@ -46,7 +46,14 @@ final class StoryReaderViewModel: ObservableObject {
     private var searchTask: Task<Void, Never>?
     private var filterGeneration = 0
     /// Cap on how many series are rendered at once (search/tags narrow it).
-    private static let displayCap = 800
+    private static let displayCap = 1000
+
+    // Full-text search
+    @Published var fullTextEnabled = false
+    /// (done, total) while building the full-text index; nil otherwise.
+    @Published private(set) var indexingProgress: (done: Int, total: Int)?
+    private var fullText: StoryFullText?
+    private var indexingTask: Task<Void, Never>?
 
     private let bookmarkKey = "storyreader.bundleBookmark"
     private let statesKey = "storyreader.readingStates"
@@ -86,8 +93,13 @@ final class StoryReaderViewModel: ObservableObject {
                 allTags = built.allTags
                 blobStart = built.blobStart
                 bundleName = url.deletingPathExtension().lastPathComponent
+                // Reset any prior bundle's full-text index.
+                indexingTask?.cancel(); indexingTask = nil
+                fullText = nil
+                indexingProgress = nil
                 phase = .ready
                 applyFilter()
+                if fullTextEnabled { ensureFullTextIndex() }
 
                 if persistBookmark, let data = Self.makeBookmark(url) {
                     UserDefaults.standard.set(data, forKey: bookmarkKey)
@@ -104,6 +116,45 @@ final class StoryReaderViewModel: ObservableObject {
     func setFilter(_ newFilter: Filter) {
         filter = newFilter
         applyFilter()
+    }
+
+    // MARK: Full-text index
+
+    func setFullText(_ on: Bool) {
+        fullTextEnabled = on
+        if on { ensureFullTextIndex() }
+        applyFilter()
+    }
+
+    private func ftCacheKey(_ url: URL) -> String {
+        let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
+        let size = (attrs?[.size] as? Int) ?? 0
+        let mtime = (attrs?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+        return "\(url.path)|\(size)|\(mtime)|ft"
+    }
+
+    private func ensureFullTextIndex() {
+        guard fullText == nil, indexingTask == nil, let url = accessURL else { return }
+        let entries = entriesByStem.values.sorted { $0.stem < $1.stem }
+        let start = blobStart
+        let key = ftCacheKey(url)
+        indexingProgress = (0, entries.count)
+        indexingTask = Task { [weak self] in
+            let built = await Task.detached(priority: .utility) { () -> StoryFullText? in
+                if let cached = StoryFullText.loadCache(key: key) { return cached }
+                guard let index = try? StoryFullText.build(url: url, entries: entries, blobStart: start,
+                    progress: { done, total in
+                        Task { @MainActor in self?.indexingProgress = (done, total) }
+                    }) else { return nil }
+                StoryFullText.saveCache(key: key, index: index)
+                return index
+            }.value
+            guard let self, !Task.isCancelled else { return }
+            self.fullText = built
+            self.indexingProgress = nil
+            self.indexingTask = nil
+            self.applyFilter()
+        }
     }
 
     private func scheduleSearch() {
@@ -123,8 +174,12 @@ final class StoryReaderViewModel: ObservableObject {
         let filter = self.filter
         let states = self.states
         let cap = Self.displayCap
+        let fullText = fullTextEnabled ? self.fullText : nil
 
         Task.detached(priority: .userInitiated) { [weak self] in
+            // Full-text (body) matches computed once; combined with title/tag match.
+            let ftStems: Set<String>? = (query.isEmpty ? nil : fullText?.matches(query))
+
             var out: [StorySeries] = []
             out.reserveCapacity(min(snapshot.count, cap))
             var total = 0
@@ -135,7 +190,9 @@ final class StoryReaderViewModel: ObservableObject {
                     case .favorites: if !(states[story.id]?.favorite ?? false) { return false }
                     case .tag(let t): if !story.tags.contains(t) { return false }
                     }
-                    return query.isEmpty || story.searchKey.contains(query)
+                    if query.isEmpty { return true }
+                    if let ftStems { return ftStems.contains(story.stem) || story.searchKey.contains(query) }
+                    return story.searchKey.contains(query)
                 }
                 guard !matches.isEmpty else { continue }
                 total += 1
@@ -373,21 +430,42 @@ private struct StoryListPane: View {
     }
 
     private var searchBar: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-            TextField("Search titles and tags", text: $model.searchText)
-                .textFieldStyle(.plain)
-                #if os(iOS)
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
-                #endif
-            if !model.searchText.isEmpty {
-                Button { model.searchText = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary) }
-                    .buttonStyle(.borderless)
+        VStack(spacing: 6) {
+            HStack(spacing: 8) {
+                Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+                TextField(model.fullTextEnabled ? "Search full text" : "Search titles and tags",
+                          text: $model.searchText)
+                    .textFieldStyle(.plain)
+                    #if os(iOS)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    #endif
+                if !model.searchText.isEmpty {
+                    Button { model.searchText = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary) }
+                        .buttonStyle(.borderless)
+                }
+                // Full-text toggle.
+                Button {
+                    model.setFullText(!model.fullTextEnabled)
+                } label: {
+                    Image(systemName: "text.magnifyingglass")
+                        .foregroundStyle(model.fullTextEnabled ? Color.accentColor : Color.secondary)
+                }
+                .buttonStyle(.borderless)
+                .help(model.fullTextEnabled ? "Full-text search on (titles, tags & story text)" : "Search titles & tags only — tap for full text")
+            }
+            .padding(.horizontal, 10).padding(.vertical, 6)
+            .background(Palette.selectedControl, in: RoundedRectangle(cornerRadius: 8))
+
+            if let progress = model.indexingProgress {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("Indexing story text… \(progress.done) / \(progress.total)")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                }
             }
         }
-        .padding(.horizontal, 10).padding(.vertical, 6)
-        .background(Palette.selectedControl, in: RoundedRectangle(cornerRadius: 8))
         .padding(.horizontal, 12).padding(.vertical, 8)
     }
 }
